@@ -41,7 +41,7 @@ if (DATABASE_URL) {
 }
 
 // ======================================================
-// EXPRESS
+// EXPRESS SERVER
 // ======================================================
 
 const app = express();
@@ -49,11 +49,11 @@ const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => {
-  res.status(200).send("✅ Proxy Tests Bot server ishlayapti!");
+  res.status(200).send("✅ Proxy Tests Bot ishlayapti!");
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({
+  res.json({
     server: "online",
     telegram: BOT_TOKEN ? "configured" : "missing",
     database: DATABASE_URL ? "configured" : "missing"
@@ -69,8 +69,8 @@ let pool = null;
 async function initDatabase() {
 
   if (!DATABASE_URL) {
-    console.error("❌ DATABASE_URL yo‘q!");
-    return;
+    console.error("❌ DATABASE_URL mavjud emas!");
+    return false;
   }
 
   pool = new Pool({
@@ -95,15 +95,50 @@ async function initDatabase() {
 
     console.log("✅ Database ulandi");
 
+    // ==================================================
+    // USERS JADVALI
+    // ==================================================
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        telegram_id BIGINT UNIQUE NOT NULL,
-        full_name TEXT,
-        username TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        id SERIAL PRIMARY KEY
       )
     `);
+
+    // Eski users jadvaliga kerakli ustunlarni qo'shamiz
+    await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS telegram_id BIGINT
+    `);
+
+    await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS full_name TEXT
+    `);
+
+    await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS username TEXT
+    `);
+
+    await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    `);
+
+    // Telegram ID uchun index
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS
+      users_telegram_id_unique
+      ON users(telegram_id)
+      WHERE telegram_id IS NOT NULL
+    `);
+
+    console.log("✅ Users jadvali tekshirildi");
+
+    // ==================================================
+    // TICKETS
+    // ==================================================
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tickets (
@@ -117,6 +152,12 @@ async function initDatabase() {
       )
     `);
 
+    console.log("✅ Tickets jadvali tayyor");
+
+    // ==================================================
+    // TESTS
+    // ==================================================
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tests (
         id SERIAL PRIMARY KEY,
@@ -125,6 +166,12 @@ async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    console.log("✅ Tests jadvali tayyor");
+
+    // ==================================================
+    // NEWS
+    // ==================================================
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS news (
@@ -136,15 +183,20 @@ async function initDatabase() {
       )
     `);
 
-    console.log("✅ Database jadvallari tayyor");
+    console.log("✅ News jadvali tayyor");
+
+    console.log("✅ DATABASE TO'LIQ TAYYOR");
+
+    return true;
 
   } catch (error) {
 
     console.error(
-      "❌ Database xatosi:",
+      "❌ DATABASE XATOSI:",
       error.message
     );
 
+    return false;
   }
 }
 
@@ -158,17 +210,20 @@ function createBot() {
 
   if (!BOT_TOKEN) {
     console.error(
-      "❌ BOT_TOKEN yo‘q. Bot yaratilmaydi!"
+      "❌ BOT_TOKEN yo'q!"
     );
+
     return null;
   }
 
-  console.log("🔵 Telegraf yaratilmoqda...");
+  console.log(
+    "🔵 Telegram bot yaratilmoqda..."
+  );
 
   const telegramBot = new Telegraf(BOT_TOKEN);
 
   // ====================================================
-  // /START
+  // START
   // ====================================================
 
   telegramBot.start(async (ctx) => {
@@ -193,6 +248,10 @@ function createBot() {
         `📩 /start: ${telegramId} ${fullName}`
       );
 
+      // ================================================
+      // USERNI DATABASEGA SAQLASH
+      // ================================================
+
       if (pool) {
 
         await pool.query(
@@ -213,7 +272,7 @@ function createBot() {
           [
             telegramId,
             fullName,
-            username
+            username || null
           ]
         );
 
@@ -222,12 +281,18 @@ function createBot() {
         );
       }
 
+      // ================================================
+      // MENYU
+      // ================================================
+
       await ctx.reply(
         `Assalomu alaykum, ${
           fullName || "foydalanuvchi"
-        }! 👋\n\n` +
-        `📝 Proxy Tests botiga xush kelibsiz!\n\n` +
-        `Kerakli bo‘limni tanlang:`,
+        }! 👋
+
+📝 Proxy Tests botiga xush kelibsiz!
+
+Kerakli bo'limni tanlang:`,
         Markup.keyboard([
           [
             "📰 Yangiliklar",
@@ -243,17 +308,18 @@ function createBot() {
     } catch (error) {
 
       console.error(
-        "❌ START xatosi:",
+        "❌ START XATOSI:",
         error.message
       );
 
+      console.error(error);
+
       try {
         await ctx.reply(
-          "❌ Xatolik yuz berdi."
+          "❌ Xatolik yuz berdi. Iltimos, qayta urinib ko'ring."
         );
       } catch {}
     }
-
   });
 
   // ====================================================
@@ -292,7 +358,8 @@ function createBot() {
           return;
         }
 
-        let text = "📰 YANGILIKLAR\n\n";
+        let text =
+          "📰 YANGILIKLAR\n\n";
 
         for (const news of result.rows) {
 
@@ -331,11 +398,12 @@ function createBot() {
     async (ctx) => {
 
       await ctx.reply(
-        "🎫 CHIPTA BO‘LIMI\n\n" +
-        "Bu yerda test uchun chipta sotib olish mumkin.\n\n" +
-        "Hozircha chipta tizimi sozlanmoqda."
-      );
+        `🎫 CHIPTA BO'LIMI
 
+Bu yerda test uchun chipta olish mumkin.
+
+Hozircha chipta tizimi sozlanmoqda.`
+      );
     }
   );
 
@@ -348,10 +416,10 @@ function createBot() {
     async (ctx) => {
 
       await ctx.reply(
-        "📝 TESTLAR BO‘LIMI\n\n" +
-        "Testni boshlash uchun amal qiluvchi chipta kerak."
-      );
+        `📝 TESTLAR BO'LIMI
 
+Testni boshlash uchun amal qiluvchi chipta kerak.`
+      );
     }
   );
 
@@ -375,6 +443,7 @@ function createBot() {
         const result = await pool.query(`
           SELECT full_name
           FROM users
+          WHERE full_name IS NOT NULL
           ORDER BY id ASC
           LIMIT 10
         `);
@@ -382,8 +451,9 @@ function createBot() {
         if (result.rows.length === 0) {
 
           await ctx.reply(
-            "🏆 LIGA\n\n" +
-            "Hozircha reyting mavjud emas."
+            `🏆 LIGA
+
+Hozircha reytingda foydalanuvchilar yo'q.`
           );
 
           return;
@@ -397,7 +467,7 @@ function createBot() {
 
             text +=
               `${index + 1}. ${
-                user.full_name || "Noma'lum"
+                user.full_name
               }\n`;
 
           }
@@ -413,10 +483,9 @@ function createBot() {
         );
 
         await ctx.reply(
-          "❌ Liga ma’lumotlarini olishda xatolik."
+          "❌ Liga ma'lumotlarini olishda xatolik."
         );
       }
-
     }
   );
 
@@ -441,11 +510,14 @@ function createBot() {
       }
 
       await ctx.reply(
-        "👨‍💼 ADMIN PANEL\n\n" +
-        "✅ Bot ishlayapti\n" +
-        "✅ Database ulangan"
-      );
+        `👨‍💼 ADMIN PANEL
 
+✅ Bot ishlayapti
+✅ Database ulangan
+
+🆔 Admin ID:
+${ADMIN_ID || "mavjud emas"}`
+      );
     }
   );
 
@@ -458,26 +530,28 @@ function createBot() {
     async (ctx) => {
 
       await ctx.reply(
-        `🆔 Sizning Telegram ID'ingiz:\n\n${ctx.from.id}`
+        `🆔 Sizning Telegram ID'ingiz:
+
+${ctx.from.id}`
       );
 
     }
   );
 
   // ====================================================
-  // BOT ERROR
+  // BOT XATOLARI
   // ====================================================
 
   telegramBot.catch(
     (error, ctx) => {
 
       console.error(
-        "❌ Telegram bot xatosi:",
+        "❌ TELEGRAM XATOSI:",
         error.message
       );
 
       console.error(
-        "Update turi:",
+        "Update:",
         ctx?.updateType
       );
 
@@ -488,124 +562,125 @@ function createBot() {
 }
 
 // ======================================================
+// BOTNI ISHGA TUSHIRISH
+// ======================================================
+
+function startBot() {
+
+  console.log(
+    "🔵 Telegram bot ishga tushirilmoqda..."
+  );
+
+  bot = createBot();
+
+  if (!bot) {
+
+    console.error(
+      "❌ Bot yaratilmadi!"
+    );
+
+    return;
+  }
+
+  console.log(
+    "🔵 bot.launch() chaqirilmoqda..."
+  );
+
+  bot.launch({
+    dropPendingUpdates: true
+  })
+  .then(async () => {
+
+    console.log(
+      "========================================"
+    );
+
+    console.log(
+      "✅ TELEGRAM BOT ISHGA TUSHDI!"
+    );
+
+    console.log(
+      "========================================"
+    );
+
+    try {
+
+      const me =
+        await bot.telegram.getMe();
+
+      console.log(
+        `🤖 BOT: @${me.username}`
+      );
+
+      console.log(
+        `🆔 BOT ID: ${me.id}`
+      );
+
+      console.log(
+        "✅ TELEGRAM BILAN ALOQA MUVAFFAQIYATLI!"
+      );
+
+    } catch (error) {
+
+      console.error(
+        "❌ getMe xatosi:",
+        error.message
+      );
+
+    }
+
+  })
+  .catch((error) => {
+
+    console.error(
+      "========================================"
+    );
+
+    console.error(
+      "❌ TELEGRAM BOT ISHGA TUSHDI!"
+    );
+
+    console.error(
+      "❌ XATO:",
+      error.message
+    );
+
+    console.error(
+      "========================================"
+    );
+
+  });
+}
+
+// ======================================================
 // SERVERNI ISHGA TUSHIRISH
 // ======================================================
 
 async function startServer() {
 
-  try {
+  console.log(
+    "🚀 Server ishga tushmoqda..."
+  );
 
-    // DATABASE
-    await initDatabase();
+  await initDatabase();
 
-    // EXPRESS
-    app.listen(
-      PORT,
-      "0.0.0.0",
-      () => {
+  app.listen(
+    PORT,
+    "0.0.0.0",
+    () => {
 
-        console.log(
-          `✅ Server running on ${PORT}`
-        );
-
-      }
-    );
-
-    // BOT
-    console.log(
-      "🔵 Telegram bot qismi boshlanmoqda..."
-    );
-
-    bot = createBot();
-
-    if (!bot) {
-      console.error(
-        "❌ Bot yaratilmadi!"
+      console.log(
+        `✅ Server running on ${PORT}`
       );
-      return;
+
     }
+  );
 
-    console.log(
-      "🔵 bot.launch() chaqirilmoqda..."
-    );
+  startBot();
 
-    bot.launch({
-      dropPendingUpdates: true
-    })
-    .then(async () => {
-
-      console.log(
-        "========================================"
-      );
-
-      console.log(
-        "✅ TELEGRAM BOT ISHGA TUSHDI!"
-      );
-
-      console.log(
-        "========================================"
-      );
-
-      try {
-
-        const me =
-          await bot.telegram.getMe();
-
-        console.log(
-          `🤖 BOT: @${me.username}`
-        );
-
-        console.log(
-          `🆔 BOT ID: ${me.id}`
-        );
-
-        console.log(
-          "✅ Telegram bilan aloqa muvaffaqiyatli!"
-        );
-
-      } catch (error) {
-
-        console.error(
-          "❌ getMe xatosi:",
-          error.message
-        );
-
-      }
-
-    })
-    .catch((error) => {
-
-      console.error(
-        "========================================"
-      );
-
-      console.error(
-        "❌ TELEGRAM BOT ISHGA TUSHMADI!"
-      );
-
-      console.error(
-        "❌ XATO:",
-        error.message
-      );
-
-      console.error(
-        "========================================"
-      );
-
-    });
-
-    console.log(
-      "🟢 server.js oxirigacha bajarildi"
-    );
-
-  } catch (error) {
-
-    console.error(
-      "❌ SERVER XATOSI:",
-      error.message
-    );
-
-  }
+  console.log(
+    "🟢 server.js oxirigacha bajarildi"
+  );
 }
 
 // ======================================================
@@ -638,4 +713,11 @@ process.once(
 // START
 // ======================================================
 
-startServer();
+startServer().catch((error) => {
+
+  console.error(
+    "❌ SERVERNI ISHGA TUSHIRISHDA XATO:",
+    error
+  );
+
+});
