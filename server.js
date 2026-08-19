@@ -13,7 +13,9 @@ const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
 const ADMIN_ID = process.env.ADMIN_ID?.trim();
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
+
 let bot = null;
+let pool = null;
 
 console.log("========================================");
 console.log("🚀 PROXY TESTS BOT");
@@ -67,8 +69,6 @@ app.get("/health", (req, res) => {
 // DATABASE
 // ======================================================
 
-let pool = null;
-
 async function initDatabase() {
 
   if (!DATABASE_URL) {
@@ -99,7 +99,7 @@ async function initDatabase() {
     console.log("✅ Database ulandi");
 
     // ==================================================
-    // USERS
+    // USERS JADVALI
     // ==================================================
 
     await pool.query(`
@@ -128,6 +128,56 @@ async function initDatabase() {
       ADD COLUMN IF NOT EXISTS created_at TIMESTAMP
       DEFAULT CURRENT_TIMESTAMP
     `);
+
+    // ==================================================
+    // ID UCHUN AVTOMATIK SEQUENCE
+    // ==================================================
+
+    console.log(
+      "🔧 Users ID avtomatik raqami tekshirilmoqda..."
+    );
+
+    await pool.query(`
+      CREATE SEQUENCE IF NOT EXISTS users_id_seq
+    `);
+
+    await pool.query(`
+      ALTER TABLE users
+      ALTER COLUMN id SET DEFAULT nextval('users_id_seq')
+    `);
+
+    await pool.query(`
+      ALTER SEQUENCE users_id_seq
+      OWNED BY users.id
+    `);
+
+    // ==================================================
+    // SEQUENCE NI MAVJUD ID BILAN MOSLASHTIRISH
+    // ==================================================
+
+    const maxIdResult = await pool.query(`
+      SELECT COALESCE(MAX(id), 0) AS max_id
+      FROM users
+    `);
+
+    const maxId = Number(
+      maxIdResult.rows[0].max_id
+    );
+
+    await pool.query(
+      `
+      SELECT setval(
+        'users_id_seq',
+        $1,
+        false
+      )
+      `,
+      [maxId + 1]
+    );
+
+    console.log(
+      `✅ Users ID sequence tayyor. Keyingi ID: ${maxId + 1}`
+    );
 
     console.log("✅ Users jadvali tayyor");
 
@@ -180,7 +230,9 @@ async function initDatabase() {
 
     console.log("✅ News jadvali tayyor");
 
+    console.log("========================================");
     console.log("✅ DATABASE TAYYOR");
+    console.log("========================================");
 
     return true;
 
@@ -212,57 +264,83 @@ async function saveUser(
     return;
   }
 
-  // Avval foydalanuvchini qidiramiz
-  const existing = await pool.query(
-    `
-    SELECT id
-    FROM users
-    WHERE telegram_id = $1
-    LIMIT 1
-    `,
-    [telegramId]
-  );
+  try {
 
-  if (existing.rows.length > 0) {
-
-    await pool.query(
+    // Avval foydalanuvchini qidiramiz
+    const existing = await pool.query(
       `
-      UPDATE users
-      SET
-        full_name = $1,
-        username = $2
-      WHERE telegram_id = $3
+      SELECT id
+      FROM users
+      WHERE telegram_id = $1
+      LIMIT 1
       `,
-      [
-        fullName,
-        username || null,
-        telegramId
-      ]
+      [telegramId]
     );
 
-  } else {
+    // ==================================================
+    // FOYDALANUVCHI MAVJUD
+    // ==================================================
 
-    await pool.query(
-      `
-      INSERT INTO users
-      (
-        telegram_id,
-        full_name,
-        username
-      )
-      VALUES ($1, $2, $3)
-      `,
-      [
-        telegramId,
-        fullName,
-        username || null
-      ]
+    if (existing.rows.length > 0) {
+
+      await pool.query(
+        `
+        UPDATE users
+        SET
+          full_name = $1,
+          username = $2
+        WHERE telegram_id = $3
+        `,
+        [
+          fullName,
+          username || null,
+          telegramId
+        ]
+      );
+
+      console.log(
+        `✅ Foydalanuvchi yangilandi: ${telegramId}`
+      );
+
+    } else {
+
+      // ==================================================
+      // YANGI FOYDALANUVCHI
+      // ID AVTOMATIK BERILADI
+      // ==================================================
+
+      const inserted = await pool.query(
+        `
+        INSERT INTO users
+        (
+          telegram_id,
+          full_name,
+          username
+        )
+        VALUES ($1, $2, $3)
+        RETURNING id
+        `,
+        [
+          telegramId,
+          fullName,
+          username || null
+        ]
+      );
+
+      console.log(
+        `✅ Yangi foydalanuvchi saqlandi. ID: ${inserted.rows[0].id}`
+      );
+    }
+
+  } catch (error) {
+
+    console.error(
+      "❌ USER SAQLASH XATOSI:",
+      error.message
     );
+
+    throw error;
   }
-
-  console.log(
-    "✅ Foydalanuvchi databasega saqlandi"
-  );
 }
 
 // ======================================================
@@ -272,6 +350,7 @@ async function saveUser(
 function createBot() {
 
   if (!BOT_TOKEN) {
+
     console.error(
       "❌ BOT_TOKEN mavjud emas!"
     );
@@ -349,9 +428,11 @@ Kerakli bo'limni tanlang:`,
       );
 
       try {
+
         await ctx.reply(
           "❌ Xatolik yuz berdi. Iltimos, qaytadan urinib ko'ring."
         );
+
       } catch {}
     }
   });
@@ -367,9 +448,11 @@ Kerakli bo'limni tanlang:`,
       try {
 
         if (!pool) {
+
           await ctx.reply(
             "❌ Database ulanmagan."
           );
+
           return;
         }
 
@@ -469,9 +552,11 @@ Testni boshlash uchun amal qiluvchi chipta kerak.`
       try {
 
         if (!pool) {
+
           await ctx.reply(
             "❌ Database ulanmagan."
           );
+
           return;
         }
 
@@ -752,7 +837,15 @@ async function startServer() {
     );
 
     // DATABASE
-    await initDatabase();
+    const databaseReady =
+      await initDatabase();
+
+    if (!databaseReady) {
+
+      console.error(
+        "❌ Database tayyor emas!"
+      );
+    }
 
     // EXPRESS
     app.listen(
