@@ -131,7 +131,6 @@ async function initDatabase() {
       CREATE UNIQUE INDEX IF NOT EXISTS
       users_telegram_id_unique
       ON users(telegram_id)
-      WHERE telegram_id IS NOT NULL
     `);
 
     console.log("✅ Users jadvali tekshirildi");
