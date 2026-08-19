@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
 const ADMIN_ID = process.env.ADMIN_ID?.trim();
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
+let bot = null;
 
 console.log("========================================");
 console.log("🚀 PROXY TESTS BOT");
