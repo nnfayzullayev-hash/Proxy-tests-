@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { Telegraf, Markup, webhookCallback } from "telegraf";
+import { webhookCallback } from "telegraf/express";
 import pg from "pg";
 
 const { Pool } = pg;
