@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import { Telegraf, Markup } from "telegraf";
-import { webhookCallback } from "telegraf/express";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -1449,10 +1448,7 @@ async function startServer() {
     // WEBHOOK ROUTE
     app.use(
       WEBHOOK_PATH,
-      webhookCallback(
-        bot,
-        "express"
-      )
+      bot.webhookCallback(WEBHOOK_PATH)
     );
 
     // SERVER
