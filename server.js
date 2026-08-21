@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import { Telegraf, Markup, webhookCallback } from "telegraf";
+import { Telegraf, Markup } from "telegraf";
 import { webhookCallback } from "telegraf/express";
 import pg from "pg";
 
