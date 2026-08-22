@@ -61,8 +61,6 @@ console.log(`🌐 WEBHOOK: ${WEBHOOK_URL}`);
 
 const app = express();
 
-app.use(express.json());
-
 app.get("/", (req, res) => {
   res.status(200).send(
     "✅ Proxy Tests Bot server ishlayapti!"
