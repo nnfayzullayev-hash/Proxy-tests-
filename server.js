@@ -15,7 +15,7 @@ const ADMIN_ID = process.env.ADMIN_ID?.trim();
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
 
 // ======================================================
-// TEKSHIRISH
+// LOG
 // ======================================================
 
 console.log("========================================");
@@ -72,6 +72,7 @@ app.get("/health", (req, res) => {
 let pool = null;
 
 if (DATABASE_URL) {
+
   pool = new Pool({
     connectionString: DATABASE_URL,
     ssl: {
@@ -80,20 +81,23 @@ if (DATABASE_URL) {
   });
 
   pool.on("error", (error) => {
+
     console.error(
       "❌ PostgreSQL xatosi:",
       error.message
     );
+
   });
 }
 
 // ======================================================
-// DATABASENI TAYYORLASH
+// DATABASE TAYYORLASH
 // ======================================================
 
 async function initDatabase() {
 
   if (!pool) {
+
     console.log(
       "⚠️ DATABASE_URL mavjud emas."
     );
@@ -107,13 +111,18 @@ async function initDatabase() {
       "⏳ PostgreSQL ulanmoqda..."
     );
 
-    await pool.query("SELECT NOW()");
+    await pool.query(
+      "SELECT NOW()"
+    );
 
     console.log(
       "✅ PostgreSQL ulandi"
     );
 
-    // USERS TABLE
+    // ==================================================
+    // USERS
+    // ==================================================
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -127,6 +136,25 @@ async function initDatabase() {
 
     console.log(
       "✅ users jadvali tayyor"
+    );
+
+    // ==================================================
+    // NEWS
+    // ==================================================
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS news (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        test_date TEXT,
+        created_at TIMESTAMP
+        DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log(
+      "✅ news jadvali tayyor"
     );
 
   } catch (error) {
@@ -147,6 +175,7 @@ async function initDatabase() {
 async function saveUser(ctx) {
 
   if (!pool) {
+
     console.log(
       "⚠️ Database yo'q, user saqlanmadi."
     );
@@ -238,6 +267,7 @@ bot.start(async (ctx) => {
 📝 Proxy Tests botiga xush kelibsiz!
 
 Kerakli bo'limni tanlang:`,
+
       Markup.keyboard([
         [
           "📰 Yangiliklar",
@@ -271,13 +301,382 @@ bot.hears(
   "📰 Yangiliklar",
   async (ctx) => {
 
-    await ctx.reply(
-      `📰 YANGILIKLAR
+    if (!pool) {
 
-Hozircha yangiliklar mavjud emas.
+      await ctx.reply(
+        "❌ Database ulanmagan."
+      );
 
-🔜 Bu bo'lim keyingi bosqichda ulanadi.`
-    );
+      return;
+    }
+
+    try {
+
+      const result =
+        await pool.query(`
+          SELECT
+            title,
+            content,
+            test_date,
+            created_at
+          FROM news
+          ORDER BY created_at DESC
+          LIMIT 10
+        `);
+
+      if (result.rows.length === 0) {
+
+        await ctx.reply(
+          "📰 Hozircha yangiliklar mavjud emas."
+        );
+
+        return;
+      }
+
+      let text =
+        "📰 YANGILIKLAR\n\n";
+
+      for (const news of result.rows) {
+
+        text +=
+          `📌 ${news.title}\n`;
+
+        text +=
+          `${news.content}\n`;
+
+        if (news.test_date) {
+
+          text +=
+            `📅 Test sanasi: ${news.test_date}\n`;
+        }
+
+        text +=
+          "\n──────────────\n\n";
+      }
+
+      await ctx.reply(text);
+
+    } catch (error) {
+
+      console.error(
+        "❌ YANGILIKLAR XATOSI:",
+        error.message
+      );
+
+      await ctx.reply(
+        "❌ Yangiliklarni olishda xatolik."
+      );
+    }
+  }
+);
+
+// ======================================================
+// ADMIN YANGILIK QO'SHISH
+// ======================================================
+
+bot.command(
+  "addnews",
+  async (ctx) => {
+
+    // ADMIN TEKSHIRISH
+
+    if (
+      ADMIN_ID &&
+      String(ctx.from.id) !==
+      String(ADMIN_ID)
+    ) {
+
+      await ctx.reply(
+        "❌ Siz administrator emassiz."
+      );
+
+      return;
+    }
+
+    // DATABASE TEKSHIRISH
+
+    if (!pool) {
+
+      await ctx.reply(
+        "❌ Database ulanmagan."
+      );
+
+      return;
+    }
+
+    // BUYRUQDAN MATNNI OLISH
+
+    const text =
+      ctx.message.text
+        .replace("/addnews", "")
+        .trim();
+
+    // FORMAT
+
+    if (!text) {
+
+      await ctx.reply(
+        `📰 YANGILIK QO'SHISH
+
+Format:
+
+/addnews Sarlavha | Matn | Sana
+
+Masalan:
+
+/addnews Yangi test | Ertaga yangi test bo'ladi | 24.08.2026`
+      );
+
+      return;
+    }
+
+    const parts =
+      text
+        .split("|")
+        .map(
+          item => item.trim()
+        );
+
+    if (parts.length < 2) {
+
+      await ctx.reply(
+        `❌ Format noto'g'ri.
+
+To'g'ri format:
+
+/addnews Sarlavha | Matn | Sana`
+      );
+
+      return;
+    }
+
+    const title =
+      parts[0];
+
+    const content =
+      parts[1];
+
+    const testDate =
+      parts[2] || null;
+
+    try {
+
+      await pool.query(
+        `
+        INSERT INTO news
+        (
+          title,
+          content,
+          test_date
+        )
+        VALUES
+        ($1, $2, $3)
+        `,
+        [
+          title,
+          content,
+          testDate
+        ]
+      );
+
+      await ctx.reply(
+        `✅ YANGILIK QO'SHILDI!
+
+📌 ${title}
+
+📝 ${content}
+
+📅 ${
+  testDate ||
+  "Sana ko'rsatilmagan"
+}`
+      );
+
+      console.log(
+        `📰 Admin yangi yangilik qo'shdi: ${title}`
+      );
+
+    } catch (error) {
+
+      console.error(
+        "❌ NEWS INSERT XATOSI:",
+        error.message
+      );
+
+      await ctx.reply(
+        "❌ Yangilikni saqlashda xatolik."
+      );
+    }
+  }
+);
+
+// ======================================================
+// YANGILIK O'CHIRISH
+// ======================================================
+
+bot.command(
+  "delnews",
+  async (ctx) => {
+
+    if (
+      ADMIN_ID &&
+      String(ctx.from.id) !==
+      String(ADMIN_ID)
+    ) {
+
+      await ctx.reply(
+        "❌ Siz administrator emassiz."
+      );
+
+      return;
+    }
+
+    if (!pool) {
+
+      await ctx.reply(
+        "❌ Database ulanmagan."
+      );
+
+      return;
+    }
+
+    const id =
+      ctx.message.text
+        .replace("/delnews", "")
+        .trim();
+
+    if (!id) {
+
+      await ctx.reply(
+        "Format:\n/delnews ID"
+      );
+
+      return;
+    }
+
+    try {
+
+      const result =
+        await pool.query(
+          `
+          DELETE FROM news
+          WHERE id = $1
+          RETURNING id
+          `,
+          [id]
+        );
+
+      if (result.rows.length === 0) {
+
+        await ctx.reply(
+          "❌ Bunday yangilik topilmadi."
+        );
+
+        return;
+      }
+
+      await ctx.reply(
+        `✅ Yangilik o'chirildi.
+
+ID: ${id}`
+      );
+
+    } catch (error) {
+
+      console.error(
+        "❌ NEWS DELETE XATOSI:",
+        error.message
+      );
+
+      await ctx.reply(
+        "❌ Yangilikni o'chirishda xatolik."
+      );
+    }
+  }
+);
+
+// ======================================================
+// YANGILIKLAR RO'YXATI - ADMIN
+// ======================================================
+
+bot.command(
+  "newslist",
+  async (ctx) => {
+
+    if (
+      ADMIN_ID &&
+      String(ctx.from.id) !==
+      String(ADMIN_ID)
+    ) {
+
+      await ctx.reply(
+        "❌ Siz administrator emassiz."
+      );
+
+      return;
+    }
+
+    if (!pool) {
+
+      await ctx.reply(
+        "❌ Database ulanmagan."
+      );
+
+      return;
+    }
+
+    try {
+
+      const result =
+        await pool.query(`
+          SELECT
+            id,
+            title,
+            test_date
+          FROM news
+          ORDER BY created_at DESC
+        `);
+
+      if (result.rows.length === 0) {
+
+        await ctx.reply(
+          "📰 Yangiliklar mavjud emas."
+        );
+
+        return;
+      }
+
+      let text =
+        "📰 YANGILIKLAR RO'YXATI\n\n";
+
+      for (const news of result.rows) {
+
+        text +=
+          `🆔 ${news.id}\n`;
+
+        text +=
+          `📌 ${news.title}\n`;
+
+        text +=
+          `📅 ${
+            news.test_date ||
+            "Sana yo'q"
+          }\n\n`;
+      }
+
+      await ctx.reply(text);
+
+    } catch (error) {
+
+      console.error(
+        "❌ NEWSLIST XATOSI:",
+        error.message
+      );
+
+      await ctx.reply(
+        "❌ Yangiliklar ro'yxatini olishda xatolik."
+      );
+    }
   }
 );
 
@@ -292,7 +691,13 @@ bot.hears(
     await ctx.reply(
       `🎫 CHIPTA
 
-Chipta olish tizimi tez orada ishga tushadi.`
+Chipta tizimi keyingi bosqichda ishga tushadi.
+
+🔜 Test tanlash
+💳 To'lov
+📸 Chek yuborish
+✅ Admin tasdiqlashi
+🔢 6 xonali chipta`
     );
   }
 );
@@ -308,7 +713,7 @@ bot.hears(
     await ctx.reply(
       `📝 TESTLAR
 
-Test tizimi tez orada ishga tushadi.
+Test tizimi keyingi bosqichda ishga tushadi.
 
 🎫 Avval chipta olishingiz kerak bo'ladi.`
     );
@@ -425,9 +830,21 @@ bot.command(
       `👨‍💼 ADMIN PANEL
 
 ✅ Bot ishlayapti
-${pool ? "✅ Database ulangan" : "⚠️ Database ulanmagan"}
 
-Keyingi bosqichlarda admin funksiyalari qo'shiladi.`
+${
+  pool
+    ? "✅ Database ulangan"
+    : "⚠️ Database ulanmagan"
+}
+
+📰 /addnews
+📰 /newslist
+🗑 /delnews ID
+
+Keyingi bosqichlarda:
+🎫 Chipta boshqaruvi
+📝 Test boshqaruvi
+💳 To'lov tekshirish`
     );
   }
 );
@@ -520,7 +937,11 @@ async function start() {
 process.once(
   "SIGINT",
   () => {
-    console.log("🛑 SIGINT");
+
+    console.log(
+      "🛑 SIGINT"
+    );
+
     bot.stop("SIGINT");
   }
 );
@@ -528,7 +949,11 @@ process.once(
 process.once(
   "SIGTERM",
   () => {
-    console.log("🛑 SIGTERM");
+
+    console.log(
+      "🛑 SIGTERM"
+    );
+
     bot.stop("SIGTERM");
   }
 );
