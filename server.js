@@ -1,1757 +1,4290 @@
-import "dotenv/config";
-import express from "express";
-import { Telegraf, Markup } from "telegraf";
-import pg from "pg";
-
-const { Pool } = pg;
-
-// ======================================================
-// SOZLAMALAR
-// ======================================================
-
-const PORT = process.env.PORT || 10000;
-const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
-const ADMIN_ID = process.env.ADMIN_ID?.trim();
-const DATABASE_URL = process.env.DATABASE_URL?.trim();
-
-const PAYMENT_CARD =
-  process.env.PAYMENT_CARD?.trim() ||
-  "Karta raqami sozlanmagan";
-
-if (!BOT_TOKEN) {
-  console.error("‚ùå BOT_TOKEN topilmadi!");
-  process.exit(1);
-}
-
-// ======================================================
-// EXPRESS
-// ======================================================
-
-const app = express();
-
-app.get("/", (req, res) => {
-  res.send("‚úÖ Proxy Tests Bot ishlayapti!");
-});
-
-app.get("/health", (req, res) => {
-  res.json({
-    server: "online",
-    database: DATABASE_URL ? "configured" : "missing",
-    telegram: BOT_TOKEN ? "configured" : "missing"
-  });
-});
-
-// ======================================================
-// DATABASE
-// ======================================================
-
-let pool = null;
-
-if (DATABASE_URL) {
-  pool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: {
-      rejectUnauthorized: false
-    }
-  });
-
-  pool.on("error", (error) => {
-    console.error(
-      "‚ùå PostgreSQL:",
-      error.message
-    );
-  });
-}
-
-// ======================================================
-// DATABASE INIT
-// ======================================================
-
-async function initDatabase() {
-
-  if (!pool) {
-    console.log("‚ö†Ô∏è DATABASE_URL mavjud emas.");
-    return;
-  }
-
-  console.log("‚è≥ PostgreSQL ulanmoqda...");
-
-  await pool.query("SELECT NOW()");
-
-  console.log("‚úÖ PostgreSQL ulandi");
-
-  // ====================================================
-  // USERS
-  // ====================================================
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      telegram_id BIGINT UNIQUE,
-      full_name TEXT,
-      username TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS telegram_id BIGINT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS full_name TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS username TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP
-    DEFAULT CURRENT_TIMESTAMP
-  `);
-
-  console.log("‚úÖ users jadvali tayyor");
-
-  // ====================================================
-  // NEWS
-  // ====================================================
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS news (
-      id SERIAL PRIMARY KEY
-    )
-  `);
-
-  await pool.query(`
-    ALTER TABLE news
-    ADD COLUMN IF NOT EXISTS title TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE news
-    ADD COLUMN IF NOT EXISTS content TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE news
-    ADD COLUMN IF NOT EXISTS test_date TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE news
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP
-    DEFAULT CURRENT_TIMESTAMP
-  `);
-
-  console.log("‚úÖ news jadvali tayyor");
-
-  // ====================================================
-  // TESTS
-  // ====================================================
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS tests (
-      id SERIAL PRIMARY KEY
-    )
-  `);
-
-  await pool.query(`
-    ALTER TABLE tests
-    ADD COLUMN IF NOT EXISTS name TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE tests
-    ADD COLUMN IF NOT EXISTS start_time TIMESTAMP
-  `);
-
-  await pool.query(`
-    ALTER TABLE tests
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP
-    DEFAULT CURRENT_TIMESTAMP
-  `);
-
-  console.log("‚úÖ tests jadvali tayyor");
-
-  // ====================================================
-  // TICKETS
-  // ====================================================
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS tickets (
-      id SERIAL PRIMARY KEY
-    )
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS ticket_number VARCHAR(6)
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS telegram_id BIGINT
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS full_name TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS test_name TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS test_id INTEGER
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS receipt_file_id TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20)
-    DEFAULT 'pending'
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS approved_by BIGINT
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP
-  `);
-
-  await pool.query(`
-    ALTER TABLE tickets
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP
-    DEFAULT CURRENT_TIMESTAMP
-  `);
-
-  console.log("‚úÖ tickets jadvali tayyor");
-
-  console.log("========================================");
-  console.log("‚úÖ DATABASE TAYYOR");
-  console.log("========================================");
-}
-
-// ======================================================
-// USER SAQLASH
-// ======================================================
-
-async function saveUser(ctx) {
-
-  if (!pool) return;
-
-  const telegramId = ctx.from.id;
-
-  const fullName =
-    `${ctx.from.first_name || ""} ${
-      ctx.from.last_name || ""
-    }`.trim();
-
-  const username =
-    ctx.from.username || null;
-
-  try {
-
-    await pool.query(
-      `
-      INSERT INTO users
-      (
-        telegram_id,
-        full_name,
-        username
-      )
-      VALUES
-      ($1, $2, $3)
-
-      ON CONFLICT (telegram_id)
-      DO UPDATE SET
-        full_name = EXCLUDED.full_name,
-        username = EXCLUDED.username
-      `,
-      [
-        telegramId,
-        fullName,
-        username
-      ]
-    );
-
-  } catch (error) {
-
-    console.error(
-      "‚ùå USER SAQLASH:",
-      error.message
-    );
-  }
-}
-
-// ======================================================
-// CHIPTA GENERATOR
-// ======================================================
-
-async function generateTicketNumber() {
-
-  while (true) {
-
-    const number =
-      Math.floor(
-        100000 +
-        Math.random() * 900000
-      ).toString();
-
-    const result =
-      await pool.query(
-        `
-        SELECT id
-        FROM tickets
-        WHERE ticket_number = $1
-        LIMIT 1
-        `,
-        [number]
-      );
-
-    if (result.rows.length === 0) {
-      return number;
-    }
-  }
-}
-
-// ======================================================
-// BOT
-// ======================================================
-
-const bot =
-  new Telegraf(BOT_TOKEN);
-
-// ======================================================
-// START
-// ======================================================
-
-bot.start(async (ctx) => {
-
-  try {
-
-    console.log(
-      `üì© /start: ${ctx.from.id}`
-    );
-
-    await saveUser(ctx);
-
-    await ctx.reply(
-      `Assalomu alaykum, ${
-        ctx.from.first_name ||
-        "foydalanuvchi"
-      }! üëã
-
-üìù Proxy Tests botiga xush kelibsiz!
-
-Kerakli bo'limni tanlang:`,
-
-      Markup.keyboard([
-        [
-          "üì∞ Yangiliklar",
-          "üé´ Chipta"
-        ],
-        [
-          "üìù Testlar",
-          "üèÜ Liga"
-        ]
-      ]).resize()
-    );
-
-  } catch (error) {
-
-    console.error(
-      "‚ùå START:",
-      error.message
-    );
-  }
-});
-
-// ======================================================
-// YANGILIKLAR
-// ======================================================
-
-bot.hears(
-  "üì∞ Yangiliklar",
-  async (ctx) => {
-
-    if (!pool) {
-      await ctx.reply(
-        "‚ùå Database ulanmagan."
-      );
-      return;
-    }
-
-    try {
-
-      const result =
-        await pool.query(`
-          SELECT
-            id,
-            title,
-            content,
-            test_date
-          FROM news
-          ORDER BY created_at DESC
-          LIMIT 20
-        `);
-
-      if (result.rows.length === 0) {
-
-        await ctx.reply(
-          "üì∞ Hozircha yangiliklar mavjud emas."
-        );
-
-        return;
-      }
-
-      let text =
-        "üì∞ YANGILIKLAR\n\n";
-
-      for (const news of result.rows) {
-
-        text +=
-          `üìå ${news.title || "Yangilik"}\n`;
-
-        text +=
-          `${news.content || ""}\n`;
-
-        if (news.test_date) {
-
-          text +=
-            `üìÖ ${news.test_date}\n`;
-        }
-
-        text +=
-          "\n‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ\n\n";
-      }
-
-      await ctx.reply(text);
-
-    } catch (error) {
-
-      console.error(
-        "‚ùå YANGILIKLAR:",
-        error.message
-      );
-
-      await ctx.reply(
-        "‚ùå Yangiliklarni olishda xatolik."
-      );
-    }
-  }
-);
-
-// ======================================================
-// ADMIN: NEWS QO'SHISH
-// ======================================================
-
-bot.command(
-  "addnews",
-  async (ctx) => {
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.reply(
-        "‚ùå Siz admin emassiz."
-      );
-
-      return;
-    }
-
-    if (!pool) {
-
-      await ctx.reply(
-        "‚ùå Database ulanmagan."
-      );
-
-      return;
-    }
-
-    const text =
-      ctx.message.text
-        .replace("/addnews", "")
-        .trim();
-
-    if (!text) {
-
-      await ctx.reply(
-        `üì∞ Format:
-
-/addnews Sarlavha | Matn | Sana
-
-Misol:
-
-/addnews Yangi test | Ertaga test bo'ladi | 24.08.2026`
-      );
-
-      return;
-    }
-
-    const parts =
-      text
-        .split("|")
-        .map(x => x.trim());
-
-    if (parts.length < 2) {
-
-      await ctx.reply(
-        "‚ùå Format noto'g'ri."
-      );
-
-      return;
-    }
-
-    const title = parts[0];
-    const content = parts[1];
-    const testDate = parts[2] || null;
-
-    try {
-
-      await pool.query(
-        `
-        INSERT INTO news
-        (
-          title,
-          content,
-          test_date
-        )
-        VALUES
-        ($1, $2, $3)
-        `,
-        [
-          title,
-          content,
-          testDate
-        ]
-      );
-
-      await ctx.reply(
-        `‚úÖ Yangilik qo'shildi!
-
-üìå ${title}
-üìù ${content}
-üìÖ ${testDate || "Sana yo'q"}`
-      );
-
-    } catch (error) {
-
-      console.error(
-        "‚ùå NEWS INSERT:",
-        error.message
-      );
-
-      await ctx.reply(
-        `‚ùå Yangilikni saqlashda xatolik.
-
-${error.message}`
-      );
-    }
-  }
-);
-
-// ======================================================
-// ADMIN: NEWS RO'YXATI
-// ======================================================
-
-bot.command(
-  "newslist",
-  async (ctx) => {
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.reply(
-        "‚ùå Siz admin emassiz."
-      );
-
-      return;
-    }
-
-    const result =
-      await pool.query(`
-        SELECT
-          id,
-          title,
-          test_date
-        FROM news
-        ORDER BY id DESC
-      `);
-
-    if (result.rows.length === 0) {
-
-      await ctx.reply(
-        "üì∞ Yangiliklar yo'q."
-      );
-
-      return;
-    }
-
-    let text =
-      "üì∞ YANGILIKLAR\n\n";
-
-    for (const news of result.rows) {
-
-      text +=
-        `üÜî ${news.id}\n`;
-
-      text +=
-        `üìå ${news.title}\n`;
-
-      text +=
-        `üìÖ ${
-          news.test_date ||
-          "Sana yo'q"
-        }\n\n`;
-    }
-
-    await ctx.reply(text);
-  }
-);
-
-// ======================================================
-// ADMIN: NEWS O'CHIRISH
-// ======================================================
-
-bot.command(
-  "delnews",
-  async (ctx) => {
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.reply(
-        "‚ùå Siz admin emassiz."
-      );
-
-      return;
-    }
-
-    const id =
-      ctx.message.text
-        .replace("/delnews", "")
-        .trim();
-
-    if (!id) {
-
-      await ctx.reply(
-        "Format: /delnews ID"
-      );
-
-      return;
-    }
-
-    try {
-
-      const result =
-        await pool.query(
-          `
-          DELETE FROM news
-          WHERE id = $1
-          RETURNING id
-          `,
-          [id]
-        );
-
-      if (result.rows.length === 0) {
-
-        await ctx.reply(
-          "‚ùå Yangilik topilmadi."
-        );
-
-        return;
-      }
-
-      await ctx.reply(
-        `‚úÖ Yangilik o'chirildi.
-
-ID: ${id}`
-      );
-
-    } catch (error) {
-
-      await ctx.reply(
-        `‚ùå Xatolik: ${error.message}`
-      );
-    }
-  }
-);
-
-// ======================================================
-// ADMIN: TEST QO'SHISH
-// ======================================================
-
-bot.command(
-  "addtest",
-  async (ctx) => {
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.reply(
-        "‚ùå Siz admin emassiz."
-      );
-
-      return;
-    }
-
-    if (!pool) {
-
-      await ctx.reply(
-        "‚ùå Database ulanmagan."
-      );
-
-      return;
-    }
-
-    const text =
-      ctx.message.text
-        .replace("/addtest", "")
-        .trim();
-
-    if (!text) {
-
-      await ctx.reply(
-        `üìù TEST QO'SHISH
-
-Format:
-
-/addtest Test nomi
-
-Misol:
-
-/addtest Tarix testi`
-      );
-
-      return;
-    }
-
-    try {
-
-      const result =
-        await pool.query(
-          `
-          INSERT INTO tests
-          (
-            name
-          )
-          VALUES
-          ($1)
-          RETURNING id, name
-          `,
-          [text]
-        );
-
-      const test =
-        result.rows[0];
-
-      await ctx.reply(
-        `‚úÖ Test qo'shildi!
-
-üÜî ID: ${test.id}
-üìù ${test.name}`
-      );
-
-    } catch (error) {
-
-      await ctx.reply(
-        `‚ùå Test qo'shishda xatolik.
-
-${error.message}`
-      );
-    }
-  }
-);
-
-// ======================================================
-// ADMIN: TESTLAR RO'YXATI
-// ======================================================
-
-bot.command(
-  "tests",
-  async (ctx) => {
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.reply(
-        "‚ùå Siz admin emassiz."
-      );
-
-      return;
-    }
-
-    const result =
-      await pool.query(`
-        SELECT
-          id,
-          name
-        FROM tests
-        ORDER BY id DESC
-      `);
-
-    if (result.rows.length === 0) {
-
-      await ctx.reply(
-        "üìù Testlar mavjud emas."
-      );
-
-      return;
-    }
-
-    let text =
-      "üìù TESTLAR\n\n";
-
-    for (const test of result.rows) {
-
-      text +=
-        `üÜî ${test.id} ‚Äî ${test.name}\n`;
-    }
-
-    await ctx.reply(text);
-  }
-);
-
-// ======================================================
-// ADMIN: TEST O'CHIRISH
-// ======================================================
-
-bot.command(
-  "deltest",
-  async (ctx) => {
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.reply(
-        "‚ùå Siz admin emassiz."
-      );
-
-      return;
-    }
-
-    const id =
-      ctx.message.text
-        .replace("/deltest", "")
-        .trim();
-
-    if (!id) {
-
-      await ctx.reply(
-        "Format: /deltest ID"
-      );
-
-      return;
-    }
-
-    try {
-
-      const result =
-        await pool.query(
-          `
-          DELETE FROM tests
-          WHERE id = $1
-          RETURNING id
-          `,
-          [id]
-        );
-
-      if (result.rows.length === 0) {
-
-        await ctx.reply(
-          "‚ùå Test topilmadi."
-        );
-
-        return;
-      }
-
-      await ctx.reply(
-        `‚úÖ Test o'chirildi.
-
-ID: ${id}`
-      );
-
-    } catch (error) {
-
-      await ctx.reply(
-        `‚ùå Xatolik: ${error.message}`
-      );
-    }
-  }
-);
-
-// ======================================================
-// CHIPTA OLISH
-// ======================================================
-
-bot.hears(
-  "üé´ Chipta",
-  async (ctx) => {
-
-    if (!pool) {
-
-      await ctx.reply(
-        "‚ùå Database ulanmagan."
-      );
-
-      return;
-    }
-
-    try {
-
-      const result =
-        await pool.query(`
-          SELECT
-            id,
-            name
-          FROM tests
-          ORDER BY id ASC
-        `);
-
-      if (result.rows.length === 0) {
-
-        await ctx.reply(
-          `üé´ CHIPTA
-
-Hozircha testlar mavjud emas.`
-        );
-
-        return;
-      }
-
-      const buttons =
-        result.rows.map(
-          (test) => [
-            Markup.button.callback(
-              `üìù ${test.name}`,
-              `buy:${test.id}`
-            )
-          ]
-        );
-
-      await ctx.reply(
-        `üé´ CHIPTA OLISH
-
-Qaysi test uchun chipta olasiz?`,
-
-        Markup.inlineKeyboard(
-          buttons
-        )
-      );
-
-    } catch (error) {
-
-      console.error(
-        "‚ùå CHIPTA:",
-        error.message
-      );
-
-      await ctx.reply(
-        "‚ùå Testlarni olishda xatolik."
-      );
-    }
-  }
-);
-
-// ======================================================
-// TEST TANLASH
-// ======================================================
-
-bot.action(
-  /^buy:(\d+)$/,
-  async (ctx) => {
-
-    try {
-
-      const testId =
-        Number(ctx.match[1]);
-
-      const result =
-        await pool.query(
-          `
-          SELECT
-            id,
-            name
-          FROM tests
-          WHERE id = $1
-          `,
-          [testId]
-        );
-
-      if (result.rows.length === 0) {
-
-        await ctx.answerCbQuery(
-          "Test topilmadi."
-        );
-
-        return;
-      }
-
-      const test =
-        result.rows[0];
-
-      // Eski pending buyurtmani tekshirish
-
-      const pending =
-        await pool.query(
-          `
-          SELECT id
-          FROM tickets
-          WHERE telegram_id = $1
-          AND test_id = $2
-          AND payment_status = 'pending'
-          LIMIT 1
-          `,
-          [
-            ctx.from.id,
-            testId
-          ]
-        );
-
-      if (pending.rows.length > 0) {
-
-        await ctx.answerCbQuery(
-          "Sizda kutayotgan buyurtma bor."
-        );
-
-        await ctx.reply(
-          `‚è≥ Siz "${test.name}" uchun allaqachon buyurtma bergansiz.
-
-Chekni yuboring yoki admin tasdiqlashini kuting.`
-        );
-
-        return;
-      }
-
-      const fullName =
-        `${ctx.from.first_name || ""} ${
-          ctx.from.last_name || ""
-        }`.trim();
-
-      const resultTicket =
-        await pool.query(
-          `
-          INSERT INTO tickets
-          (
-            telegram_id,
-            full_name,
-            test_name,
-            test_id,
-            payment_status
-          )
-          VALUES
-          ($1, $2, $3, $4, 'pending')
-          RETURNING id
-          `,
-          [
-            ctx.from.id,
-            fullName,
-            test.name,
-            testId
-          ]
-        );
-
-      const ticketId =
-        resultTicket.rows[0].id;
-
-      await ctx.answerCbQuery();
-
-      await ctx.reply(
-        `üé´ CHIPTA BUYURTMASI
-
-üìù Test:
-${test.name}
-
-üí≥ To'lov uchun karta:
-
-${PAYMENT_CARD}
-
-üí∞ To'lovni amalga oshirgach,
-chek rasmini shu chatga yuboring.
-
-üÜî Buyurtma ID:
-${ticketId}`
-      );
-
-    } catch (error) {
-
-      console.error(
-        "‚ùå BUY XATOSI:",
-        error.message
-      );
-
-      await ctx.answerCbQuery(
-        "Xatolik yuz berdi."
-      );
-    }
-  }
-);
-
-// ======================================================
-// CHEK QABUL QILISH
-// ======================================================
-
-bot.on(
-  "photo",
-  async (ctx, next) => {
-
-    if (!pool) {
-      return next();
-    }
-
-    try {
-
-      const result =
-        await pool.query(
-          `
-          SELECT
-            id,
-            test_name
-          FROM tickets
-          WHERE telegram_id = $1
-          AND payment_status = 'pending'
-          AND receipt_file_id IS NULL
-          ORDER BY created_at DESC
-          LIMIT 1
-          `,
-          [ctx.from.id]
-        );
-
-      if (result.rows.length === 0) {
-        return next();
-      }
-
-      const ticket =
-        result.rows[0];
-
-      const photos =
-        ctx.message.photo;
-
-      const largest =
-        photos[
-          photos.length - 1
-        ];
-
-      const fileId =
-        largest.file_id;
-
-      await pool.query(
-        `
-        UPDATE tickets
-        SET receipt_file_id = $1
-        WHERE id = $2
-        `,
-        [
-          fileId,
-          ticket.id
-        ]
-      );
-
-      await ctx.reply(
-        `‚úÖ CHEK QABUL QILINDI
-
-üÜî Buyurtma:
-${ticket.id}
-
-üìù Test:
-${ticket.test_name}
-
-‚è≥ Admin tekshiruvini kuting.`
-      );
-
-      // ADMIN
-      if (ADMIN_ID) {
-
-        await bot.telegram.sendPhoto(
-          ADMIN_ID,
-          fileId,
-          {
-            caption:
-              `üí≥ YANGI TO'LOV
-
-üÜî Buyurtma:
-${ticket.id}
-
-üìù Test:
-${ticket.test_name}
-
-üë§ Telegram ID:
-${ctx.from.id}
-
-üë§ F.I.SH:
-${(
-  `${ctx.from.first_name || ""} ${
-    ctx.from.last_name || ""
-  }`
-).trim()}`,
-
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: "‚úÖ TASDIQLASH",
-                    callback_data:
-                      `approve:${ticket.id}`
-                  }
-                ],
-                [
-                  {
-                    text: "‚ùå RAD ETISH",
-                    callback_data:
-                      `reject:${ticket.id}`
-                  }
-                ]
-              ]
-            }
-          }
-        );
-      }
-
-    } catch (error) {
-
-      console.error(
-        "‚ùå CHEK:",
-        error.message
-      );
-
-      await ctx.reply(
-        "‚ùå Chekni saqlashda xatolik."
-      );
-    }
-  }
-);
-
-// ======================================================
-// ADMIN TASDIQLASH
-// ======================================================
-
-bot.action(
-  /^approve:(\d+)$/,
-  async (ctx) => {
-
-    try {
-
-      if (
-        ADMIN_ID &&
-        String(ctx.from.id) !==
-        String(ADMIN_ID)
-      ) {
-
-        await ctx.answerCbQuery(
-          "Siz admin emassiz."
-        );
-
-        return;
-      }
-
-      const ticketId =
-        Number(ctx.match[1]);
-
-      const result =
-        await pool.query(
-          `
-          SELECT *
-          FROM tickets
-          WHERE id = $1
-          LIMIT 1
-          `,
-          [ticketId]
-        );
-
-      if (result.rows.length === 0) {
-
-        await ctx.answerCbQuery(
-          "Buyurtma topilmadi."
-        );
-
-        return;
-      }
-
-      const ticket =
-        result.rows[0];
-
-      if (
-        ticket.payment_status ===
-        "approved"
-      ) {
-
-        await ctx.answerCbQuery(
-          "Allaqachon tasdiqlangan."
-        );
-
-        return;
-      }
-
-      const ticketNumber =
-        await generateTicketNumber();
-
-      const expiresAt =
-        new Date(
-          Date.now() +
-          24 * 60 * 60 * 1000
-        );
-
-      await pool.query(
-        `
-        UPDATE tickets
-        SET
-          ticket_number = $1,
-          payment_status = 'approved',
-          approved_by = $2,
-          approved_at = CURRENT_TIMESTAMP,
-          expires_at = $3
-        WHERE id = $4
-        `,
-        [
-          ticketNumber,
-          ctx.from.id,
-          expiresAt,
-          ticketId
-        ]
-      );
-
-      await bot.telegram.sendMessage(
-        ticket.telegram_id,
-
-        `üéâ TO'LOV TASDIQLANDI!
-
-üé´ Sizning chiptangiz:
-
-üî¢ ${ticketNumber}
-
-üìù Test:
-${ticket.test_name}
-
-‚è∞ Amal qilish muddati:
-24 soat
-
-üìù Testlar bo'limiga kirib,
-chipta raqamingizni kiriting.`
-      );
-
-      await ctx.answerCbQuery(
-        "‚úÖ Tasdiqlandi!"
-      );
-
-      try {
-
-        await ctx.editMessageCaption(
-          `‚úÖ TO'LOV TASDIQLANDI
-
-üÜî Buyurtma:
-${ticketId}
-
-üìù Test:
-${ticket.test_name}
-
-üî¢ Chipta:
-${ticketNumber}
-
-üë§ Telegram ID:
-${ticket.telegram_id}`
-        );
-
-      } catch {}
-
-    } catch (error) {
-
-      console.error(
-        "‚ùå APPROVE:",
-        error.message
-      );
-
-      await ctx.answerCbQuery(
-        "Tasdiqlashda xatolik."
-      );
-    }
-  }
-);
-
-// ======================================================
-// ADMIN RAD ETISH
-// ======================================================
-
-bot.action(
-  /^reject:(\d+)$/,
-  async (ctx) => {
-
-    try {
-
-      if (
-        ADMIN_ID &&
-        String(ctx.from.id) !==
-        String(ADMIN_ID)
-      ) {
-
-        await ctx.answerCbQuery(
-          "Siz admin emassiz."
-        );
-
-        return;
-      }
-
-      const ticketId =
-        Number(ctx.match[1]);
-
-      const result =
-        await pool.query(
-          `
-          SELECT *
-          FROM tickets
-          WHERE id = $1
-          `,
-          [ticketId]
-        );
-
-      if (result.rows.length === 0) {
-
-        await ctx.answerCbQuery(
-          "Buyurtma topilmadi."
-        );
-
-        return;
-      }
-
-      const ticket =
-        result.rows[0];
-
-      await pool.query(
-        `
-        UPDATE tickets
-        SET
-          payment_status = 'rejected',
-          approved_by = $1,
-          approved_at = CURRENT_TIMESTAMP
-        WHERE id = $2
-        `,
-        [
-          ctx.from.id,
-          ticketId
-        ]
-      );
-
-      await bot.telegram.sendMessage(
-        ticket.telegram_id,
-
-        `‚ùå TO'LOV RAD ETILDI
-
-üìù Test:
-${ticket.test_name}
-
-Iltimos, to'lov chekini tekshirib,
-qaytadan urinib ko'ring.`
-      );
-
-      await ctx.answerCbQuery(
-        "‚ùå Rad etildi."
-      );
-
-      try {
-
-        await ctx.editMessageCaption(
-          `‚ùå TO'LOV RAD ETILDI
-
-üÜî Buyurtma:
-${ticketId}
-
-üìù Test:
-${ticket.test_name}`
-        );
-
-      } catch {}
-
-    } catch (error) {
-
-      console.error(
-        "‚ùå REJECT:",
-        error.message
-      );
-
-      await ctx.answerCbQuery(
-        "Rad etishda xatolik."
-      );
-    }
-  }
-);
-
-// ======================================================
-// TESTLAR BO'LIMI
-// ======================================================
-
-bot.hears(
-  "üìù Testlar",
-  async (ctx) => {
-
-    await ctx.reply(
-      `üìù TESTLAR
-
-üé´ Testga kirish uchun tasdiqlangan
-6 xonali chipta kerak.
-
-Hozircha test tizimining o'zi
-keyingi bosqichda ulanadi.`
-    );
-  }
-);
-
-// ======================================================
-// LIGA
-// ======================================================
-
-bot.hears(
-  "üèÜ Liga",
-  async (ctx) => {
-
-    if (!pool) {
-
-      await ctx.reply(
-        "‚ùå Database ulanmagan."
-      );
-
-      return;
-    }
-
-    try {
-
-      const result =
-        await pool.query(`
-          SELECT
-            full_name
-          FROM users
-          WHERE full_name IS NOT NULL
-          ORDER BY id ASC
-          LIMIT 10
-        `);
-
-      if (result.rows.length === 0) {
-
-        await ctx.reply(
-          "üèÜ Liga hozircha bo'sh."
-        );
-
-        return;
-      }
-
-      let text =
-        "üèÜ LIGA\n\n";
-
-      result.rows.forEach(
-        (user, index) => {
-
-          text +=
-            `${index + 1}. ${
-              user.full_name
-            }\n`;
-        }
-      );
-
-      await ctx.reply(text);
-
-    } catch (error) {
-
-      await ctx.reply(
-        "‚ùå Liga xatosi."
-      );
-    }
-  }
-);
-
-// ======================================================
-// USER ID
-// ======================================================
-
-bot.command(
-  "id",
-  async (ctx) => {
-
-    await ctx.reply(
-      `üÜî Sizning Telegram ID:
-
-${ctx.from.id}`
-    );
-  }
-);
-
-// ======================================================
-// ADMIN
-// ======================================================
-
-bot.command(
-  "admin",
-  async (ctx) => {
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.reply(
-        "‚ùå Siz admin emassiz."
-      );
-
-      return;
-    }
-
-    await ctx.reply(
-      `üë®‚Äçüíº ADMIN PANEL
-
-üì∞ Yangilik:
- /addnews
- /newslist
- /delnews ID
-
-üìù Test:
- /addtest
- /tests
- /deltest ID
-
-üé´ Chipta:
-Cheklar avtomatik keladi.
-
-üí≥ Karta:
-${PAYMENT_CARD}`
-    );
-  }
-);
-
-// ======================================================
-// XATOLAR
-// ======================================================
-
-bot.catch(
-  (error, ctx) => {
-
-    console.error(
-      "‚ùå TELEGRAM XATOSI:",
-      error.message
-    );
-
-    console.error(
-      "Update:",
-      ctx?.updateType
-    );
-  }
-);
-
-// ======================================================
-// START SERVER
-// ======================================================
-
-async function start() {
-
-  try {
-
-    console.log(
-      "üöÄ Server ishga tushmoqda..."
-    );
-
-    await initDatabase();
-
-    app.listen(
-      PORT,
-      "0.0.0.0",
-      async () => {
-
-        console.log(
-          `‚úÖ Server running on ${PORT}`
-        );
-
-        try {
-
-          const me =
-            await bot.telegram.getMe();
-
-          console.log(
-            `ü§ñ BOT: @${me.username}`
-          );
-
-          await bot.launch();
-
-          console.log(
-            "üü¢ Telegram bot ishga tushdi!"
-          );
-
-        } catch (error) {
-
-          console.error(
-            "‚ùå BOT XATOSI:",
-            error.message
-          );
-        }
-      }
-    );
-
-  } catch (error) {
-
-    console.error(
-      "‚ùå SERVER XATOSI:",
-      error.message
-    );
-
-    process.exit(1);
-  }
-}
-
-// ======================================================
-// SHUTDOWN
-// ======================================================
-
-process.once(
-  "SIGINT",
-  () => {
-    bot.stop("SIGINT");
-  }
-);
-
-process.once(
-  "SIGTERM",
-  () => {
-    bot.stop("SIGTERM");
-  }
-);
-
-// ======================================================
-// ISHGA TUSHIRISH
-// ======================================================
-
-start();
+%PDF-1.4
+%%Œº·ø¶
+
+1 0 obj
+<</F1 2 0 R/F2 3 0 R/F3 4 0 R/F4 5 0 R>>
+endobj
+
+2 0 obj
+<</BaseFont/Helvetica/Encoding/WinAnsiEncoding/Name/F1/Subtype/Type1/Type/Font>>
+endobj
+
+3 0 obj
+<</BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding/Name/F2/Subtype/Type1/Type/Font>>
+endobj
+
+4 0 obj
+<</BaseFont/Courier/Encoding/WinAnsiEncoding/Name/F3/Subtype/Type1/Type/Font>>
+endobj
+
+5 0 obj
+<</BaseFont/ZapfDingbats/Name/F4/Subtype/Type1/Type/Font>>
+endobj
+
+6 0 obj
+<</Contents 17 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+7 0 obj
+<</Contents 18 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+8 0 obj
+<</Contents 19 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+9 0 obj
+<</Contents 20 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+10 0 obj
+<</Contents 21 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+11 0 obj
+<</Contents 22 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+12 0 obj
+<</Contents 23 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+13 0 obj
+<</Contents 24 0 R/MediaBox[0 0 595.2756 841.8898]/Parent 16 0 R/Resources<</Font 1 0 R/ProcSet[/PDF/Text/ImageB/ImageC/ImageI]>>/Rotate 0/Trans<<>>/Type/Page>>
+endobj
+
+14 1 obj
+<</PageMode/UseNone/Pages 16 0 R/Type/Catalog/AF[26 0 R]/Names<</EmbeddedFiles<</Names[(Content Credentials)26 0 R]>>>>>>
+endobj
+
+16 0 obj
+<</Count 8/Kids[6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R]/Type/Pages>>
+endobj
+
+17 0 obj
+<</Length 64099>>
+stream
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 745.18978 Tm
+(i) Tj
+1 0 0 1 38.02 745.18978 Tm
+(m) Tj
+1 0 0 1 42.04 745.18978 Tm
+(p) Tj
+1 0 0 1 46.059999 745.18978 Tm
+(o) Tj
+1 0 0 1 50.08 745.18978 Tm
+(r) Tj
+1 0 0 1 54.1 745.18978 Tm
+(t) Tj
+1 0 0 1 58.120004 745.18978 Tm
+( ) Tj
+1 0 0 1 62.14 745.18978 Tm
+(") Tj
+1 0 0 1 66.16 745.18978 Tm
+(d) Tj
+1 0 0 1 70.18 745.18978 Tm
+(o) Tj
+1 0 0 1 74.2 745.18978 Tm
+(t) Tj
+1 0 0 1 78.22 745.18978 Tm
+(e) Tj
+1 0 0 1 82.240009 745.18978 Tm
+(n) Tj
+1 0 0 1 86.26 745.18978 Tm
+(v) Tj
+1 0 0 1 90.28 745.18978 Tm
+(/) Tj
+1 0 0 1 94.3 745.18978 Tm
+(c) Tj
+1 0 0 1 98.32 745.18978 Tm
+(o) Tj
+1 0 0 1 102.34 745.18978 Tm
+(n) Tj
+1 0 0 1 106.35999 745.18978 Tm
+(f) Tj
+1 0 0 1 110.37999 745.18978 Tm
+(i) Tj
+1 0 0 1 114.39999 745.18978 Tm
+(g) Tj
+1 0 0 1 118.41998 745.18978 Tm
+(") Tj
+1 0 0 1 122.43998 745.18978 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 736.98977 Tm
+(i) Tj
+1 0 0 1 38.02 736.98977 Tm
+(m) Tj
+1 0 0 1 42.04 736.98977 Tm
+(p) Tj
+1 0 0 1 46.059999 736.98977 Tm
+(o) Tj
+1 0 0 1 50.08 736.98977 Tm
+(r) Tj
+1 0 0 1 54.1 736.98977 Tm
+(t) Tj
+1 0 0 1 58.120004 736.98977 Tm
+( ) Tj
+1 0 0 1 62.14 736.98977 Tm
+(e) Tj
+1 0 0 1 66.16 736.98977 Tm
+(x) Tj
+1 0 0 1 70.18 736.98977 Tm
+(p) Tj
+1 0 0 1 74.2 736.98977 Tm
+(r) Tj
+1 0 0 1 78.22 736.98977 Tm
+(e) Tj
+1 0 0 1 82.240009 736.98977 Tm
+(s) Tj
+1 0 0 1 86.26 736.98977 Tm
+(s) Tj
+1 0 0 1 90.28 736.98977 Tm
+( ) Tj
+1 0 0 1 94.3 736.98977 Tm
+(f) Tj
+1 0 0 1 98.32 736.98977 Tm
+(r) Tj
+1 0 0 1 102.34 736.98977 Tm
+(o) Tj
+1 0 0 1 106.35999 736.98977 Tm
+(m) Tj
+1 0 0 1 110.37999 736.98977 Tm
+( ) Tj
+1 0 0 1 114.39999 736.98977 Tm
+(") Tj
+1 0 0 1 118.41998 736.98977 Tm
+(e) Tj
+1 0 0 1 122.43998 736.98977 Tm
+(x) Tj
+1 0 0 1 126.45998 736.98977 Tm
+(p) Tj
+1 0 0 1 130.47998 736.98977 Tm
+(r) Tj
+1 0 0 1 134.49997 736.98977 Tm
+(e) Tj
+1 0 0 1 138.51996 736.98977 Tm
+(s) Tj
+1 0 0 1 142.53997 736.98977 Tm
+(s) Tj
+1 0 0 1 146.55997 736.98977 Tm
+(") Tj
+1 0 0 1 150.57996 736.98977 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 728.78976 Tm
+(i) Tj
+1 0 0 1 38.02 728.78976 Tm
+(m) Tj
+1 0 0 1 42.04 728.78976 Tm
+(p) Tj
+1 0 0 1 46.059999 728.78976 Tm
+(o) Tj
+1 0 0 1 50.08 728.78976 Tm
+(r) Tj
+1 0 0 1 54.1 728.78976 Tm
+(t) Tj
+1 0 0 1 58.120004 728.78976 Tm
+( ) Tj
+1 0 0 1 62.14 728.78976 Tm
+({) Tj
+1 0 0 1 66.16 728.78976 Tm
+( ) Tj
+1 0 0 1 70.18 728.78976 Tm
+(T) Tj
+1 0 0 1 74.2 728.78976 Tm
+(e) Tj
+1 0 0 1 78.22 728.78976 Tm
+(l) Tj
+1 0 0 1 82.240009 728.78976 Tm
+(e) Tj
+1 0 0 1 86.26 728.78976 Tm
+(g) Tj
+1 0 0 1 90.28 728.78976 Tm
+(r) Tj
+1 0 0 1 94.3 728.78976 Tm
+(a) Tj
+1 0 0 1 98.32 728.78976 Tm
+(f) Tj
+1 0 0 1 102.34 728.78976 Tm
+(,) Tj
+1 0 0 1 106.35999 728.78976 Tm
+( ) Tj
+1 0 0 1 110.37999 728.78976 Tm
+(M) Tj
+1 0 0 1 114.39999 728.78976 Tm
+(a) Tj
+1 0 0 1 118.41998 728.78976 Tm
+(r) Tj
+1 0 0 1 122.43998 728.78976 Tm
+(k) Tj
+1 0 0 1 126.45998 728.78976 Tm
+(u) Tj
+1 0 0 1 130.47998 728.78976 Tm
+(p) Tj
+1 0 0 1 134.49997 728.78976 Tm
+( ) Tj
+1 0 0 1 138.51996 728.78976 Tm
+(}) Tj
+1 0 0 1 142.53997 728.78976 Tm
+( ) Tj
+1 0 0 1 146.55997 728.78976 Tm
+(f) Tj
+1 0 0 1 150.57996 728.78976 Tm
+(r) Tj
+1 0 0 1 154.59995 728.78976 Tm
+(o) Tj
+1 0 0 1 158.61995 728.78976 Tm
+(m) Tj
+1 0 0 1 162.63996 728.78976 Tm
+( ) Tj
+1 0 0 1 166.65996 728.78976 Tm
+(") Tj
+1 0 0 1 170.67996 728.78976 Tm
+(t) Tj
+1 0 0 1 174.69997 728.78976 Tm
+(e) Tj
+1 0 0 1 178.71997 728.78976 Tm
+(l) Tj
+1 0 0 1 182.73998 728.78976 Tm
+(e) Tj
+1 0 0 1 186.75998 728.78976 Tm
+(g) Tj
+1 0 0 1 190.77999 728.78976 Tm
+(r) Tj
+1 0 0 1 194.79999 728.78976 Tm
+(a) Tj
+1 0 0 1 198.81999 728.78976 Tm
+(f) Tj
+1 0 0 1 202.84 728.78976 Tm
+(") Tj
+1 0 0 1 206.86 728.78976 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 720.5897 Tm
+(i) Tj
+1 0 0 1 38.02 720.5897 Tm
+(m) Tj
+1 0 0 1 42.04 720.5897 Tm
+(p) Tj
+1 0 0 1 46.059999 720.5897 Tm
+(o) Tj
+1 0 0 1 50.08 720.5897 Tm
+(r) Tj
+1 0 0 1 54.1 720.5897 Tm
+(t) Tj
+1 0 0 1 58.120004 720.5897 Tm
+( ) Tj
+1 0 0 1 62.14 720.5897 Tm
+(p) Tj
+1 0 0 1 66.16 720.5897 Tm
+(g) Tj
+1 0 0 1 70.18 720.5897 Tm
+( ) Tj
+1 0 0 1 74.2 720.5897 Tm
+(f) Tj
+1 0 0 1 78.22 720.5897 Tm
+(r) Tj
+1 0 0 1 82.240009 720.5897 Tm
+(o) Tj
+1 0 0 1 86.26 720.5897 Tm
+(m) Tj
+1 0 0 1 90.28 720.5897 Tm
+( ) Tj
+1 0 0 1 94.3 720.5897 Tm
+(") Tj
+1 0 0 1 98.32 720.5897 Tm
+(p) Tj
+1 0 0 1 102.34 720.5897 Tm
+(g) Tj
+1 0 0 1 106.35999 720.5897 Tm
+(") Tj
+1 0 0 1 110.37999 720.5897 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 704.1897 Tm
+(c) Tj
+1 0 0 1 38.02 704.1897 Tm
+(o) Tj
+1 0 0 1 42.04 704.1897 Tm
+(n) Tj
+1 0 0 1 46.059999 704.1897 Tm
+(s) Tj
+1 0 0 1 50.08 704.1897 Tm
+(t) Tj
+1 0 0 1 54.1 704.1897 Tm
+( ) Tj
+1 0 0 1 58.120004 704.1897 Tm
+({) Tj
+1 0 0 1 62.14 704.1897 Tm
+( ) Tj
+1 0 0 1 66.16 704.1897 Tm
+(P) Tj
+1 0 0 1 70.18 704.1897 Tm
+(o) Tj
+1 0 0 1 74.2 704.1897 Tm
+(o) Tj
+1 0 0 1 78.22 704.1897 Tm
+(l) Tj
+1 0 0 1 82.240009 704.1897 Tm
+( ) Tj
+1 0 0 1 86.26 704.1897 Tm
+(}) Tj
+1 0 0 1 90.28 704.1897 Tm
+( ) Tj
+1 0 0 1 94.3 704.1897 Tm
+(=) Tj
+1 0 0 1 98.32 704.1897 Tm
+( ) Tj
+1 0 0 1 102.34 704.1897 Tm
+(p) Tj
+1 0 0 1 106.35999 704.1897 Tm
+(g) Tj
+1 0 0 1 110.37999 704.1897 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 687.7897 Tm
+(c) Tj
+1 0 0 1 38.02 687.7897 Tm
+(o) Tj
+1 0 0 1 42.04 687.7897 Tm
+(n) Tj
+1 0 0 1 46.059999 687.7897 Tm
+(s) Tj
+1 0 0 1 50.08 687.7897 Tm
+(t) Tj
+1 0 0 1 54.1 687.7897 Tm
+( ) Tj
+1 0 0 1 58.120004 687.7897 Tm
+(P) Tj
+1 0 0 1 62.14 687.7897 Tm
+(O) Tj
+1 0 0 1 66.16 687.7897 Tm
+(R) Tj
+1 0 0 1 70.18 687.7897 Tm
+(T) Tj
+1 0 0 1 74.2 687.7897 Tm
+( ) Tj
+1 0 0 1 78.22 687.7897 Tm
+(=) Tj
+1 0 0 1 82.240009 687.7897 Tm
+( ) Tj
+1 0 0 1 86.26 687.7897 Tm
+(p) Tj
+1 0 0 1 90.28 687.7897 Tm
+(r) Tj
+1 0 0 1 94.3 687.7897 Tm
+(o) Tj
+1 0 0 1 98.32 687.7897 Tm
+(c) Tj
+1 0 0 1 102.34 687.7897 Tm
+(e) Tj
+1 0 0 1 106.35999 687.7897 Tm
+(s) Tj
+1 0 0 1 110.37999 687.7897 Tm
+(s) Tj
+1 0 0 1 114.39999 687.7897 Tm
+(.) Tj
+1 0 0 1 118.41998 687.7897 Tm
+(e) Tj
+1 0 0 1 122.43998 687.7897 Tm
+(n) Tj
+1 0 0 1 126.45998 687.7897 Tm
+(v) Tj
+1 0 0 1 130.47998 687.7897 Tm
+(.) Tj
+1 0 0 1 134.49997 687.7897 Tm
+(P) Tj
+1 0 0 1 138.51996 687.7897 Tm
+(O) Tj
+1 0 0 1 142.53997 687.7897 Tm
+(R) Tj
+1 0 0 1 146.55997 687.7897 Tm
+(T) Tj
+1 0 0 1 150.57996 687.7897 Tm
+( ) Tj
+1 0 0 1 154.59995 687.7897 Tm
+(|) Tj
+1 0 0 1 158.61995 687.7897 Tm
+(|) Tj
+1 0 0 1 162.63996 687.7897 Tm
+( ) Tj
+1 0 0 1 166.65996 687.7897 Tm
+(1) Tj
+1 0 0 1 170.67996 687.7897 Tm
+(0) Tj
+1 0 0 1 174.69997 687.7897 Tm
+(0) Tj
+1 0 0 1 178.71997 687.7897 Tm
+(0) Tj
+1 0 0 1 182.73998 687.7897 Tm
+(0) Tj
+1 0 0 1 186.75998 687.7897 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 679.58969 Tm
+(c) Tj
+1 0 0 1 38.02 679.58969 Tm
+(o) Tj
+1 0 0 1 42.04 679.58969 Tm
+(n) Tj
+1 0 0 1 46.059999 679.58969 Tm
+(s) Tj
+1 0 0 1 50.08 679.58969 Tm
+(t) Tj
+1 0 0 1 54.1 679.58969 Tm
+( ) Tj
+1 0 0 1 58.120004 679.58969 Tm
+(B) Tj
+1 0 0 1 62.14 679.58969 Tm
+(O) Tj
+1 0 0 1 66.16 679.58969 Tm
+(T) Tj
+1 0 0 1 70.18 679.58969 Tm
+(_) Tj
+1 0 0 1 74.2 679.58969 Tm
+(T) Tj
+1 0 0 1 78.22 679.58969 Tm
+(O) Tj
+1 0 0 1 82.240009 679.58969 Tm
+(K) Tj
+1 0 0 1 86.26 679.58969 Tm
+(E) Tj
+1 0 0 1 90.28 679.58969 Tm
+(N) Tj
+1 0 0 1 94.3 679.58969 Tm
+( ) Tj
+1 0 0 1 98.32 679.58969 Tm
+(=) Tj
+1 0 0 1 102.34 679.58969 Tm
+( ) Tj
+1 0 0 1 106.35999 679.58969 Tm
+(p) Tj
+1 0 0 1 110.37999 679.58969 Tm
+(r) Tj
+1 0 0 1 114.39999 679.58969 Tm
+(o) Tj
+1 0 0 1 118.41998 679.58969 Tm
+(c) Tj
+1 0 0 1 122.43998 679.58969 Tm
+(e) Tj
+1 0 0 1 126.45998 679.58969 Tm
+(s) Tj
+1 0 0 1 130.47998 679.58969 Tm
+(s) Tj
+1 0 0 1 134.49997 679.58969 Tm
+(.) Tj
+1 0 0 1 138.51996 679.58969 Tm
+(e) Tj
+1 0 0 1 142.53997 679.58969 Tm
+(n) Tj
+1 0 0 1 146.55997 679.58969 Tm
+(v) Tj
+1 0 0 1 150.57996 679.58969 Tm
+(.) Tj
+1 0 0 1 154.59995 679.58969 Tm
+(B) Tj
+1 0 0 1 158.61995 679.58969 Tm
+(O) Tj
+1 0 0 1 162.63996 679.58969 Tm
+(T) Tj
+1 0 0 1 166.65996 679.58969 Tm
+(_) Tj
+1 0 0 1 170.67996 679.58969 Tm
+(T) Tj
+1 0 0 1 174.69997 679.58969 Tm
+(O) Tj
+1 0 0 1 178.71997 679.58969 Tm
+(K) Tj
+1 0 0 1 182.73998 679.58969 Tm
+(E) Tj
+1 0 0 1 186.75998 679.58969 Tm
+(N) Tj
+1 0 0 1 190.77999 679.58969 Tm
+(?) Tj
+1 0 0 1 194.79999 679.58969 Tm
+(.) Tj
+1 0 0 1 198.81999 679.58969 Tm
+(t) Tj
+1 0 0 1 202.84 679.58969 Tm
+(r) Tj
+1 0 0 1 206.86 679.58969 Tm
+(i) Tj
+1 0 0 1 210.88 679.58969 Tm
+(m) Tj
+1 0 0 1 214.90001 679.58969 Tm
+(\() Tj
+1 0 0 1 218.92002 679.58969 Tm
+(\)) Tj
+1 0 0 1 222.94002 679.58969 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 671.38967 Tm
+(c) Tj
+1 0 0 1 38.02 671.38967 Tm
+(o) Tj
+1 0 0 1 42.04 671.38967 Tm
+(n) Tj
+1 0 0 1 46.059999 671.38967 Tm
+(s) Tj
+1 0 0 1 50.08 671.38967 Tm
+(t) Tj
+1 0 0 1 54.1 671.38967 Tm
+( ) Tj
+1 0 0 1 58.120004 671.38967 Tm
+(A) Tj
+1 0 0 1 62.14 671.38967 Tm
+(D) Tj
+1 0 0 1 66.16 671.38967 Tm
+(M) Tj
+1 0 0 1 70.18 671.38967 Tm
+(I) Tj
+1 0 0 1 74.2 671.38967 Tm
+(N) Tj
+1 0 0 1 78.22 671.38967 Tm
+(_) Tj
+1 0 0 1 82.240009 671.38967 Tm
+(I) Tj
+1 0 0 1 86.26 671.38967 Tm
+(D) Tj
+1 0 0 1 90.28 671.38967 Tm
+( ) Tj
+1 0 0 1 94.3 671.38967 Tm
+(=) Tj
+1 0 0 1 98.32 671.38967 Tm
+( ) Tj
+1 0 0 1 102.34 671.38967 Tm
+(p) Tj
+1 0 0 1 106.35999 671.38967 Tm
+(r) Tj
+1 0 0 1 110.37999 671.38967 Tm
+(o) Tj
+1 0 0 1 114.39999 671.38967 Tm
+(c) Tj
+1 0 0 1 118.41998 671.38967 Tm
+(e) Tj
+1 0 0 1 122.43998 671.38967 Tm
+(s) Tj
+1 0 0 1 126.45998 671.38967 Tm
+(s) Tj
+1 0 0 1 130.47998 671.38967 Tm
+(.) Tj
+1 0 0 1 134.49997 671.38967 Tm
+(e) Tj
+1 0 0 1 138.51996 671.38967 Tm
+(n) Tj
+1 0 0 1 142.53997 671.38967 Tm
+(v) Tj
+1 0 0 1 146.55997 671.38967 Tm
+(.) Tj
+1 0 0 1 150.57996 671.38967 Tm
+(A) Tj
+1 0 0 1 154.59995 671.38967 Tm
+(D) Tj
+1 0 0 1 158.61995 671.38967 Tm
+(M) Tj
+1 0 0 1 162.63996 671.38967 Tm
+(I) Tj
+1 0 0 1 166.65996 671.38967 Tm
+(N) Tj
+1 0 0 1 170.67996 671.38967 Tm
+(_) Tj
+1 0 0 1 174.69997 671.38967 Tm
+(I) Tj
+1 0 0 1 178.71997 671.38967 Tm
+(D) Tj
+1 0 0 1 182.73998 671.38967 Tm
+(?) Tj
+1 0 0 1 186.75998 671.38967 Tm
+(.) Tj
+1 0 0 1 190.77999 671.38967 Tm
+(t) Tj
+1 0 0 1 194.79999 671.38967 Tm
+(r) Tj
+1 0 0 1 198.81999 671.38967 Tm
+(i) Tj
+1 0 0 1 202.84 671.38967 Tm
+(m) Tj
+1 0 0 1 206.86 671.38967 Tm
+(\() Tj
+1 0 0 1 210.88 671.38967 Tm
+(\)) Tj
+1 0 0 1 214.90001 671.38967 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 663.18966 Tm
+(c) Tj
+1 0 0 1 38.02 663.18966 Tm
+(o) Tj
+1 0 0 1 42.04 663.18966 Tm
+(n) Tj
+1 0 0 1 46.059999 663.18966 Tm
+(s) Tj
+1 0 0 1 50.08 663.18966 Tm
+(t) Tj
+1 0 0 1 54.1 663.18966 Tm
+( ) Tj
+1 0 0 1 58.120004 663.18966 Tm
+(D) Tj
+1 0 0 1 62.14 663.18966 Tm
+(A) Tj
+1 0 0 1 66.16 663.18966 Tm
+(T) Tj
+1 0 0 1 70.18 663.18966 Tm
+(A) Tj
+1 0 0 1 74.2 663.18966 Tm
+(B) Tj
+1 0 0 1 78.22 663.18966 Tm
+(A) Tj
+1 0 0 1 82.240009 663.18966 Tm
+(S) Tj
+1 0 0 1 86.26 663.18966 Tm
+(E) Tj
+1 0 0 1 90.28 663.18966 Tm
+(_) Tj
+1 0 0 1 94.3 663.18966 Tm
+(U) Tj
+1 0 0 1 98.32 663.18966 Tm
+(R) Tj
+1 0 0 1 102.34 663.18966 Tm
+(L) Tj
+1 0 0 1 106.35999 663.18966 Tm
+( ) Tj
+1 0 0 1 110.37999 663.18966 Tm
+(=) Tj
+1 0 0 1 114.39999 663.18966 Tm
+( ) Tj
+1 0 0 1 118.41998 663.18966 Tm
+(p) Tj
+1 0 0 1 122.43998 663.18966 Tm
+(r) Tj
+1 0 0 1 126.45998 663.18966 Tm
+(o) Tj
+1 0 0 1 130.47998 663.18966 Tm
+(c) Tj
+1 0 0 1 134.49997 663.18966 Tm
+(e) Tj
+1 0 0 1 138.51996 663.18966 Tm
+(s) Tj
+1 0 0 1 142.53997 663.18966 Tm
+(s) Tj
+1 0 0 1 146.55997 663.18966 Tm
+(.) Tj
+1 0 0 1 150.57996 663.18966 Tm
+(e) Tj
+1 0 0 1 154.59995 663.18966 Tm
+(n) Tj
+1 0 0 1 158.61995 663.18966 Tm
+(v) Tj
+1 0 0 1 162.63996 663.18966 Tm
+(.) Tj
+1 0 0 1 166.65996 663.18966 Tm
+(D) Tj
+1 0 0 1 170.67996 663.18966 Tm
+(A) Tj
+1 0 0 1 174.69997 663.18966 Tm
+(T) Tj
+1 0 0 1 178.71997 663.18966 Tm
+(A) Tj
+1 0 0 1 182.73998 663.18966 Tm
+(B) Tj
+1 0 0 1 186.75998 663.18966 Tm
+(A) Tj
+1 0 0 1 190.77999 663.18966 Tm
+(S) Tj
+1 0 0 1 194.79999 663.18966 Tm
+(E) Tj
+1 0 0 1 198.81999 663.18966 Tm
+(_) Tj
+1 0 0 1 202.84 663.18966 Tm
+(U) Tj
+1 0 0 1 206.86 663.18966 Tm
+(R) Tj
+1 0 0 1 210.88 663.18966 Tm
+(L) Tj
+1 0 0 1 214.90001 663.18966 Tm
+(?) Tj
+1 0 0 1 218.92002 663.18966 Tm
+(.) Tj
+1 0 0 1 222.94002 663.18966 Tm
+(t) Tj
+1 0 0 1 226.96002 663.18966 Tm
+(r) Tj
+1 0 0 1 230.98003 663.18966 Tm
+(i) Tj
+1 0 0 1 235.00003 663.18966 Tm
+(m) Tj
+1 0 0 1 239.02004 663.18966 Tm
+(\() Tj
+1 0 0 1 243.04004 663.18966 Tm
+(\)) Tj
+1 0 0 1 247.06005 663.18966 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 654.9896 Tm
+(c) Tj
+1 0 0 1 38.02 654.9896 Tm
+(o) Tj
+1 0 0 1 42.04 654.9896 Tm
+(n) Tj
+1 0 0 1 46.059999 654.9896 Tm
+(s) Tj
+1 0 0 1 50.08 654.9896 Tm
+(t) Tj
+1 0 0 1 54.1 654.9896 Tm
+( ) Tj
+1 0 0 1 58.120004 654.9896 Tm
+(P) Tj
+1 0 0 1 62.14 654.9896 Tm
+(A) Tj
+1 0 0 1 66.16 654.9896 Tm
+(Y) Tj
+1 0 0 1 70.18 654.9896 Tm
+(M) Tj
+1 0 0 1 74.2 654.9896 Tm
+(E) Tj
+1 0 0 1 78.22 654.9896 Tm
+(N) Tj
+1 0 0 1 82.240009 654.9896 Tm
+(T) Tj
+1 0 0 1 86.26 654.9896 Tm
+(_) Tj
+1 0 0 1 90.28 654.9896 Tm
+(C) Tj
+1 0 0 1 94.3 654.9896 Tm
+(A) Tj
+1 0 0 1 98.32 654.9896 Tm
+(R) Tj
+1 0 0 1 102.34 654.9896 Tm
+(D) Tj
+1 0 0 1 106.35999 654.9896 Tm
+( ) Tj
+1 0 0 1 110.37999 654.9896 Tm
+(=) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 646.7896 Tm
+(p) Tj
+1 0 0 1 46.059999 646.7896 Tm
+(r) Tj
+1 0 0 1 50.08 646.7896 Tm
+(o) Tj
+1 0 0 1 54.1 646.7896 Tm
+(c) Tj
+1 0 0 1 58.120004 646.7896 Tm
+(e) Tj
+1 0 0 1 62.14 646.7896 Tm
+(s) Tj
+1 0 0 1 66.16 646.7896 Tm
+(s) Tj
+1 0 0 1 70.18 646.7896 Tm
+(.) Tj
+1 0 0 1 74.2 646.7896 Tm
+(e) Tj
+1 0 0 1 78.22 646.7896 Tm
+(n) Tj
+1 0 0 1 82.240009 646.7896 Tm
+(v) Tj
+1 0 0 1 86.26 646.7896 Tm
+(.) Tj
+1 0 0 1 90.28 646.7896 Tm
+(P) Tj
+1 0 0 1 94.3 646.7896 Tm
+(A) Tj
+1 0 0 1 98.32 646.7896 Tm
+(Y) Tj
+1 0 0 1 102.34 646.7896 Tm
+(M) Tj
+1 0 0 1 106.35999 646.7896 Tm
+(E) Tj
+1 0 0 1 110.37999 646.7896 Tm
+(N) Tj
+1 0 0 1 114.39999 646.7896 Tm
+(T) Tj
+1 0 0 1 118.41998 646.7896 Tm
+(_) Tj
+1 0 0 1 122.43998 646.7896 Tm
+(C) Tj
+1 0 0 1 126.45998 646.7896 Tm
+(A) Tj
+1 0 0 1 130.47998 646.7896 Tm
+(R) Tj
+1 0 0 1 134.49997 646.7896 Tm
+(D) Tj
+1 0 0 1 138.51996 646.7896 Tm
+(?) Tj
+1 0 0 1 142.53997 646.7896 Tm
+(.) Tj
+1 0 0 1 146.55997 646.7896 Tm
+(t) Tj
+1 0 0 1 150.57996 646.7896 Tm
+(r) Tj
+1 0 0 1 154.59995 646.7896 Tm
+(i) Tj
+1 0 0 1 158.61995 646.7896 Tm
+(m) Tj
+1 0 0 1 162.63996 646.7896 Tm
+(\() Tj
+1 0 0 1 166.65996 646.7896 Tm
+(\)) Tj
+1 0 0 1 170.67996 646.7896 Tm
+( ) Tj
+1 0 0 1 174.69997 646.7896 Tm
+(|) Tj
+1 0 0 1 178.71997 646.7896 Tm
+(|) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 638.5896 Tm
+(") Tj
+1 0 0 1 46.059999 638.5896 Tm
+(K) Tj
+1 0 0 1 50.08 638.5896 Tm
+(a) Tj
+1 0 0 1 54.1 638.5896 Tm
+(r) Tj
+1 0 0 1 58.120004 638.5896 Tm
+(t) Tj
+1 0 0 1 62.14 638.5896 Tm
+(a) Tj
+1 0 0 1 66.16 638.5896 Tm
+( ) Tj
+1 0 0 1 70.18 638.5896 Tm
+(r) Tj
+1 0 0 1 74.2 638.5896 Tm
+(a) Tj
+1 0 0 1 78.22 638.5896 Tm
+(q) Tj
+1 0 0 1 82.240009 638.5896 Tm
+(a) Tj
+1 0 0 1 86.26 638.5896 Tm
+(m) Tj
+1 0 0 1 90.28 638.5896 Tm
+(i) Tj
+1 0 0 1 94.3 638.5896 Tm
+( ) Tj
+1 0 0 1 98.32 638.5896 Tm
+(s) Tj
+1 0 0 1 102.34 638.5896 Tm
+(o) Tj
+1 0 0 1 106.35999 638.5896 Tm
+(z) Tj
+1 0 0 1 110.37999 638.5896 Tm
+(l) Tj
+1 0 0 1 114.39999 638.5896 Tm
+(a) Tj
+1 0 0 1 118.41998 638.5896 Tm
+(n) Tj
+1 0 0 1 122.43998 638.5896 Tm
+(m) Tj
+1 0 0 1 126.45998 638.5896 Tm
+(a) Tj
+1 0 0 1 130.47998 638.5896 Tm
+(g) Tj
+1 0 0 1 134.49997 638.5896 Tm
+(a) Tj
+1 0 0 1 138.51996 638.5896 Tm
+(n) Tj
+1 0 0 1 142.53997 638.5896 Tm
+(") Tj
+1 0 0 1 146.55997 638.5896 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 622.1896 Tm
+(i) Tj
+1 0 0 1 38.02 622.1896 Tm
+(f) Tj
+1 0 0 1 42.04 622.1896 Tm
+( ) Tj
+1 0 0 1 46.059999 622.1896 Tm
+(\() Tj
+1 0 0 1 50.08 622.1896 Tm
+(!) Tj
+1 0 0 1 54.1 622.1896 Tm
+(B) Tj
+1 0 0 1 58.120004 622.1896 Tm
+(O) Tj
+1 0 0 1 62.14 622.1896 Tm
+(T) Tj
+1 0 0 1 66.16 622.1896 Tm
+(_) Tj
+1 0 0 1 70.18 622.1896 Tm
+(T) Tj
+1 0 0 1 74.2 622.1896 Tm
+(O) Tj
+1 0 0 1 78.22 622.1896 Tm
+(K) Tj
+1 0 0 1 82.240009 622.1896 Tm
+(E) Tj
+1 0 0 1 86.26 622.1896 Tm
+(N) Tj
+1 0 0 1 90.28 622.1896 Tm
+(\)) Tj
+1 0 0 1 94.3 622.1896 Tm
+( ) Tj
+1 0 0 1 98.32 622.1896 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 613.98959 Tm
+(c) Tj
+1 0 0 1 46.059999 613.98959 Tm
+(o) Tj
+1 0 0 1 50.08 613.98959 Tm
+(n) Tj
+1 0 0 1 54.1 613.98959 Tm
+(s) Tj
+1 0 0 1 58.120004 613.98959 Tm
+(o) Tj
+1 0 0 1 62.14 613.98959 Tm
+(l) Tj
+1 0 0 1 66.16 613.98959 Tm
+(e) Tj
+1 0 0 1 70.18 613.98959 Tm
+(.) Tj
+1 0 0 1 74.2 613.98959 Tm
+(e) Tj
+1 0 0 1 78.22 613.98959 Tm
+(r) Tj
+1 0 0 1 82.240009 613.98959 Tm
+(r) Tj
+1 0 0 1 86.26 613.98959 Tm
+(o) Tj
+1 0 0 1 90.28 613.98959 Tm
+(r) Tj
+1 0 0 1 94.3 613.98959 Tm
+(\() Tj
+1 0 0 1 98.32 613.98959 Tm
+(") Tj
+/F4 6.7 Tf
+1 0 0 1 102.34 613.98959 Tm
+(n) Tj
+/F3 6.7 Tf
+1 0 0 1 107.4387 613.98959 Tm
+( ) Tj
+1 0 0 1 111.458698 613.98959 Tm
+(B) Tj
+1 0 0 1 115.47869 613.98959 Tm
+(O) Tj
+1 0 0 1 119.49869 613.98959 Tm
+(T) Tj
+1 0 0 1 123.518688 613.98959 Tm
+(_) Tj
+1 0 0 1 127.53868 613.98959 Tm
+(T) Tj
+1 0 0 1 131.55869 613.98959 Tm
+(O) Tj
+1 0 0 1 135.57868 613.98959 Tm
+(K) Tj
+1 0 0 1 139.59867 613.98959 Tm
+(E) Tj
+1 0 0 1 143.61867 613.98959 Tm
+(N) Tj
+1 0 0 1 147.63867 613.98959 Tm
+( ) Tj
+1 0 0 1 151.65866 613.98959 Tm
+(t) Tj
+1 0 0 1 155.67865 613.98959 Tm
+(o) Tj
+1 0 0 1 159.69866 613.98959 Tm
+(p) Tj
+1 0 0 1 163.71866 613.98959 Tm
+(i) Tj
+1 0 0 1 167.73867 613.98959 Tm
+(l) Tj
+1 0 0 1 171.75867 613.98959 Tm
+(m) Tj
+1 0 0 1 175.77867 613.98959 Tm
+(a) Tj
+1 0 0 1 179.79868 613.98959 Tm
+(d) Tj
+1 0 0 1 183.81868 613.98959 Tm
+(i) Tj
+1 0 0 1 187.83869 613.98959 Tm
+(!) Tj
+1 0 0 1 191.85869 613.98959 Tm
+(") Tj
+1 0 0 1 195.8787 613.98959 Tm
+(\)) Tj
+1 0 0 1 199.8987 613.98959 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 605.78958 Tm
+(p) Tj
+1 0 0 1 46.059999 605.78958 Tm
+(r) Tj
+1 0 0 1 50.08 605.78958 Tm
+(o) Tj
+1 0 0 1 54.1 605.78958 Tm
+(c) Tj
+1 0 0 1 58.120004 605.78958 Tm
+(e) Tj
+1 0 0 1 62.14 605.78958 Tm
+(s) Tj
+1 0 0 1 66.16 605.78958 Tm
+(s) Tj
+1 0 0 1 70.18 605.78958 Tm
+(.) Tj
+1 0 0 1 74.2 605.78958 Tm
+(e) Tj
+1 0 0 1 78.22 605.78958 Tm
+(x) Tj
+1 0 0 1 82.240009 605.78958 Tm
+(i) Tj
+1 0 0 1 86.26 605.78958 Tm
+(t) Tj
+1 0 0 1 90.28 605.78958 Tm
+(\() Tj
+1 0 0 1 94.3 605.78958 Tm
+(1) Tj
+1 0 0 1 98.32 605.78958 Tm
+(\)) Tj
+1 0 0 1 102.34 605.78958 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 597.58956 Tm
+(}) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 581.1895 Tm
+(c) Tj
+1 0 0 1 38.02 581.1895 Tm
+(o) Tj
+1 0 0 1 42.04 581.1895 Tm
+(n) Tj
+1 0 0 1 46.059999 581.1895 Tm
+(s) Tj
+1 0 0 1 50.08 581.1895 Tm
+(t) Tj
+1 0 0 1 54.1 581.1895 Tm
+( ) Tj
+1 0 0 1 58.120004 581.1895 Tm
+(a) Tj
+1 0 0 1 62.14 581.1895 Tm
+(p) Tj
+1 0 0 1 66.16 581.1895 Tm
+(p) Tj
+1 0 0 1 70.18 581.1895 Tm
+( ) Tj
+1 0 0 1 74.2 581.1895 Tm
+(=) Tj
+1 0 0 1 78.22 581.1895 Tm
+( ) Tj
+1 0 0 1 82.240009 581.1895 Tm
+(e) Tj
+1 0 0 1 86.26 581.1895 Tm
+(x) Tj
+1 0 0 1 90.28 581.1895 Tm
+(p) Tj
+1 0 0 1 94.3 581.1895 Tm
+(r) Tj
+1 0 0 1 98.32 581.1895 Tm
+(e) Tj
+1 0 0 1 102.34 581.1895 Tm
+(s) Tj
+1 0 0 1 106.35999 581.1895 Tm
+(s) Tj
+1 0 0 1 110.37999 581.1895 Tm
+(\() Tj
+1 0 0 1 114.39999 581.1895 Tm
+(\)) Tj
+1 0 0 1 118.41998 581.1895 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 564.7895 Tm
+(a) Tj
+1 0 0 1 38.02 564.7895 Tm
+(p) Tj
+1 0 0 1 42.04 564.7895 Tm
+(p) Tj
+1 0 0 1 46.059999 564.7895 Tm
+(.) Tj
+1 0 0 1 50.08 564.7895 Tm
+(g) Tj
+1 0 0 1 54.1 564.7895 Tm
+(e) Tj
+1 0 0 1 58.120004 564.7895 Tm
+(t) Tj
+1 0 0 1 62.14 564.7895 Tm
+(\() Tj
+1 0 0 1 66.16 564.7895 Tm
+(") Tj
+1 0 0 1 70.18 564.7895 Tm
+(/) Tj
+1 0 0 1 74.2 564.7895 Tm
+(") Tj
+1 0 0 1 78.22 564.7895 Tm
+(,) Tj
+1 0 0 1 82.240009 564.7895 Tm
+( ) Tj
+1 0 0 1 86.26 564.7895 Tm
+(\() Tj
+1 0 0 1 90.28 564.7895 Tm
+(r) Tj
+1 0 0 1 94.3 564.7895 Tm
+(e) Tj
+1 0 0 1 98.32 564.7895 Tm
+(q) Tj
+1 0 0 1 102.34 564.7895 Tm
+(,) Tj
+1 0 0 1 106.35999 564.7895 Tm
+( ) Tj
+1 0 0 1 110.37999 564.7895 Tm
+(r) Tj
+1 0 0 1 114.39999 564.7895 Tm
+(e) Tj
+1 0 0 1 118.41998 564.7895 Tm
+(s) Tj
+1 0 0 1 122.43998 564.7895 Tm
+(\)) Tj
+1 0 0 1 126.45998 564.7895 Tm
+( ) Tj
+1 0 0 1 130.47998 564.7895 Tm
+(=) Tj
+1 0 0 1 134.49997 564.7895 Tm
+(>) Tj
+1 0 0 1 138.51996 564.7895 Tm
+( ) Tj
+1 0 0 1 142.53997 564.7895 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 556.5895 Tm
+(r) Tj
+1 0 0 1 46.059999 556.5895 Tm
+(e) Tj
+1 0 0 1 50.08 556.5895 Tm
+(s) Tj
+1 0 0 1 54.1 556.5895 Tm
+(.) Tj
+1 0 0 1 58.120004 556.5895 Tm
+(s) Tj
+1 0 0 1 62.14 556.5895 Tm
+(e) Tj
+1 0 0 1 66.16 556.5895 Tm
+(n) Tj
+1 0 0 1 70.18 556.5895 Tm
+(d) Tj
+1 0 0 1 74.2 556.5895 Tm
+(\() Tj
+1 0 0 1 78.22 556.5895 Tm
+(") Tj
+/F4 6.7 Tf
+1 0 0 1 82.240009 556.5895 Tm
+(n) Tj
+/F3 6.7 Tf
+1 0 0 1 87.3387 556.5895 Tm
+( ) Tj
+1 0 0 1 91.3587 556.5895 Tm
+(P) Tj
+1 0 0 1 95.37871 556.5895 Tm
+(r) Tj
+1 0 0 1 99.398708 556.5895 Tm
+(o) Tj
+1 0 0 1 103.4187 556.5895 Tm
+(x) Tj
+1 0 0 1 107.4387 556.5895 Tm
+(y) Tj
+1 0 0 1 111.458698 556.5895 Tm
+( ) Tj
+1 0 0 1 115.47869 556.5895 Tm
+(T) Tj
+1 0 0 1 119.49869 556.5895 Tm
+(e) Tj
+1 0 0 1 123.518688 556.5895 Tm
+(s) Tj
+1 0 0 1 127.53868 556.5895 Tm
+(t) Tj
+1 0 0 1 131.55869 556.5895 Tm
+(s) Tj
+1 0 0 1 135.57868 556.5895 Tm
+( ) Tj
+1 0 0 1 139.59867 556.5895 Tm
+(B) Tj
+1 0 0 1 143.61867 556.5895 Tm
+(o) Tj
+1 0 0 1 147.63867 556.5895 Tm
+(t) Tj
+1 0 0 1 151.65866 556.5895 Tm
+( ) Tj
+1 0 0 1 155.67865 556.5895 Tm
+(i) Tj
+1 0 0 1 159.69866 556.5895 Tm
+(s) Tj
+1 0 0 1 163.71866 556.5895 Tm
+(h) Tj
+1 0 0 1 167.73867 556.5895 Tm
+(l) Tj
+1 0 0 1 171.75867 556.5895 Tm
+(a) Tj
+1 0 0 1 175.77867 556.5895 Tm
+(y) Tj
+1 0 0 1 179.79868 556.5895 Tm
+(a) Tj
+1 0 0 1 183.81868 556.5895 Tm
+(p) Tj
+1 0 0 1 187.83869 556.5895 Tm
+(t) Tj
+1 0 0 1 191.85869 556.5895 Tm
+(i) Tj
+1 0 0 1 195.8787 556.5895 Tm
+(!) Tj
+1 0 0 1 199.8987 556.5895 Tm
+(") Tj
+1 0 0 1 203.9187 556.5895 Tm
+(\)) Tj
+1 0 0 1 207.9387 556.5895 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 548.38949 Tm
+(}) Tj
+1 0 0 1 38.02 548.38949 Tm
+(\)) Tj
+1 0 0 1 42.04 548.38949 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 531.98947 Tm
+(a) Tj
+1 0 0 1 38.02 531.98947 Tm
+(p) Tj
+1 0 0 1 42.04 531.98947 Tm
+(p) Tj
+1 0 0 1 46.059999 531.98947 Tm
+(.) Tj
+1 0 0 1 50.08 531.98947 Tm
+(g) Tj
+1 0 0 1 54.1 531.98947 Tm
+(e) Tj
+1 0 0 1 58.120004 531.98947 Tm
+(t) Tj
+1 0 0 1 62.14 531.98947 Tm
+(\() Tj
+1 0 0 1 66.16 531.98947 Tm
+(") Tj
+1 0 0 1 70.18 531.98947 Tm
+(/) Tj
+1 0 0 1 74.2 531.98947 Tm
+(h) Tj
+1 0 0 1 78.22 531.98947 Tm
+(e) Tj
+1 0 0 1 82.240009 531.98947 Tm
+(a) Tj
+1 0 0 1 86.26 531.98947 Tm
+(l) Tj
+1 0 0 1 90.28 531.98947 Tm
+(t) Tj
+1 0 0 1 94.3 531.98947 Tm
+(h) Tj
+1 0 0 1 98.32 531.98947 Tm
+(") Tj
+1 0 0 1 102.34 531.98947 Tm
+(,) Tj
+1 0 0 1 106.35999 531.98947 Tm
+( ) Tj
+1 0 0 1 110.37999 531.98947 Tm
+(\() Tj
+1 0 0 1 114.39999 531.98947 Tm
+(r) Tj
+1 0 0 1 118.41998 531.98947 Tm
+(e) Tj
+1 0 0 1 122.43998 531.98947 Tm
+(q) Tj
+1 0 0 1 126.45998 531.98947 Tm
+(,) Tj
+1 0 0 1 130.47998 531.98947 Tm
+( ) Tj
+1 0 0 1 134.49997 531.98947 Tm
+(r) Tj
+1 0 0 1 138.51996 531.98947 Tm
+(e) Tj
+1 0 0 1 142.53997 531.98947 Tm
+(s) Tj
+1 0 0 1 146.55997 531.98947 Tm
+(\)) Tj
+1 0 0 1 150.57996 531.98947 Tm
+( ) Tj
+1 0 0 1 154.59995 531.98947 Tm
+(=) Tj
+1 0 0 1 158.61995 531.98947 Tm
+(>) Tj
+1 0 0 1 162.63996 531.98947 Tm
+( ) Tj
+1 0 0 1 166.65996 531.98947 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 523.7894 Tm
+(r) Tj
+1 0 0 1 46.059999 523.7894 Tm
+(e) Tj
+1 0 0 1 50.08 523.7894 Tm
+(s) Tj
+1 0 0 1 54.1 523.7894 Tm
+(.) Tj
+1 0 0 1 58.120004 523.7894 Tm
+(j) Tj
+1 0 0 1 62.14 523.7894 Tm
+(s) Tj
+1 0 0 1 66.16 523.7894 Tm
+(o) Tj
+1 0 0 1 70.18 523.7894 Tm
+(n) Tj
+1 0 0 1 74.2 523.7894 Tm
+(\() Tj
+1 0 0 1 78.22 523.7894 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 515.5894 Tm
+(s) Tj
+1 0 0 1 54.1 515.5894 Tm
+(e) Tj
+1 0 0 1 58.120004 515.5894 Tm
+(r) Tj
+1 0 0 1 62.14 515.5894 Tm
+(v) Tj
+1 0 0 1 66.16 515.5894 Tm
+(e) Tj
+1 0 0 1 70.18 515.5894 Tm
+(r) Tj
+1 0 0 1 74.2 515.5894 Tm
+(:) Tj
+1 0 0 1 78.22 515.5894 Tm
+( ) Tj
+1 0 0 1 82.240009 515.5894 Tm
+(") Tj
+1 0 0 1 86.26 515.5894 Tm
+(o) Tj
+1 0 0 1 90.28 515.5894 Tm
+(n) Tj
+1 0 0 1 94.3 515.5894 Tm
+(l) Tj
+1 0 0 1 98.32 515.5894 Tm
+(i) Tj
+1 0 0 1 102.34 515.5894 Tm
+(n) Tj
+1 0 0 1 106.35999 515.5894 Tm
+(e) Tj
+1 0 0 1 110.37999 515.5894 Tm
+(") Tj
+1 0 0 1 114.39999 515.5894 Tm
+(,) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 507.3894 Tm
+(d) Tj
+1 0 0 1 54.1 507.3894 Tm
+(a) Tj
+1 0 0 1 58.120004 507.3894 Tm
+(t) Tj
+1 0 0 1 62.14 507.3894 Tm
+(a) Tj
+1 0 0 1 66.16 507.3894 Tm
+(b) Tj
+1 0 0 1 70.18 507.3894 Tm
+(a) Tj
+1 0 0 1 74.2 507.3894 Tm
+(s) Tj
+1 0 0 1 78.22 507.3894 Tm
+(e) Tj
+1 0 0 1 82.240009 507.3894 Tm
+(:) Tj
+1 0 0 1 86.26 507.3894 Tm
+( ) Tj
+1 0 0 1 90.28 507.3894 Tm
+(D) Tj
+1 0 0 1 94.3 507.3894 Tm
+(A) Tj
+1 0 0 1 98.32 507.3894 Tm
+(T) Tj
+1 0 0 1 102.34 507.3894 Tm
+(A) Tj
+1 0 0 1 106.35999 507.3894 Tm
+(B) Tj
+1 0 0 1 110.37999 507.3894 Tm
+(A) Tj
+1 0 0 1 114.39999 507.3894 Tm
+(S) Tj
+1 0 0 1 118.41998 507.3894 Tm
+(E) Tj
+1 0 0 1 122.43998 507.3894 Tm
+(_) Tj
+1 0 0 1 126.45998 507.3894 Tm
+(U) Tj
+1 0 0 1 130.47998 507.3894 Tm
+(R) Tj
+1 0 0 1 134.49997 507.3894 Tm
+(L) Tj
+1 0 0 1 138.51996 507.3894 Tm
+( ) Tj
+1 0 0 1 142.53997 507.3894 Tm
+(?) Tj
+1 0 0 1 146.55997 507.3894 Tm
+( ) Tj
+1 0 0 1 150.57996 507.3894 Tm
+(") Tj
+1 0 0 1 154.59995 507.3894 Tm
+(c) Tj
+1 0 0 1 158.61995 507.3894 Tm
+(o) Tj
+1 0 0 1 162.63996 507.3894 Tm
+(n) Tj
+1 0 0 1 166.65996 507.3894 Tm
+(f) Tj
+1 0 0 1 170.67996 507.3894 Tm
+(i) Tj
+1 0 0 1 174.69997 507.3894 Tm
+(g) Tj
+1 0 0 1 178.71997 507.3894 Tm
+(u) Tj
+1 0 0 1 182.73998 507.3894 Tm
+(r) Tj
+1 0 0 1 186.75998 507.3894 Tm
+(e) Tj
+1 0 0 1 190.77999 507.3894 Tm
+(d) Tj
+1 0 0 1 194.79999 507.3894 Tm
+(") Tj
+1 0 0 1 198.81999 507.3894 Tm
+( ) Tj
+1 0 0 1 202.84 507.3894 Tm
+(:) Tj
+1 0 0 1 206.86 507.3894 Tm
+( ) Tj
+1 0 0 1 210.88 507.3894 Tm
+(") Tj
+1 0 0 1 214.90001 507.3894 Tm
+(m) Tj
+1 0 0 1 218.92002 507.3894 Tm
+(i) Tj
+1 0 0 1 222.94002 507.3894 Tm
+(s) Tj
+1 0 0 1 226.96002 507.3894 Tm
+(s) Tj
+1 0 0 1 230.98003 507.3894 Tm
+(i) Tj
+1 0 0 1 235.00003 507.3894 Tm
+(n) Tj
+1 0 0 1 239.02004 507.3894 Tm
+(g) Tj
+1 0 0 1 243.04004 507.3894 Tm
+(") Tj
+1 0 0 1 247.06005 507.3894 Tm
+(,) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 499.1894 Tm
+(t) Tj
+1 0 0 1 54.1 499.1894 Tm
+(e) Tj
+1 0 0 1 58.120004 499.1894 Tm
+(l) Tj
+1 0 0 1 62.14 499.1894 Tm
+(e) Tj
+1 0 0 1 66.16 499.1894 Tm
+(g) Tj
+1 0 0 1 70.18 499.1894 Tm
+(r) Tj
+1 0 0 1 74.2 499.1894 Tm
+(a) Tj
+1 0 0 1 78.22 499.1894 Tm
+(m) Tj
+1 0 0 1 82.240009 499.1894 Tm
+(:) Tj
+1 0 0 1 86.26 499.1894 Tm
+( ) Tj
+1 0 0 1 90.28 499.1894 Tm
+(B) Tj
+1 0 0 1 94.3 499.1894 Tm
+(O) Tj
+1 0 0 1 98.32 499.1894 Tm
+(T) Tj
+1 0 0 1 102.34 499.1894 Tm
+(_) Tj
+1 0 0 1 106.35999 499.1894 Tm
+(T) Tj
+1 0 0 1 110.37999 499.1894 Tm
+(O) Tj
+1 0 0 1 114.39999 499.1894 Tm
+(K) Tj
+1 0 0 1 118.41998 499.1894 Tm
+(E) Tj
+1 0 0 1 122.43998 499.1894 Tm
+(N) Tj
+1 0 0 1 126.45998 499.1894 Tm
+( ) Tj
+1 0 0 1 130.47998 499.1894 Tm
+(?) Tj
+1 0 0 1 134.49997 499.1894 Tm
+( ) Tj
+1 0 0 1 138.51996 499.1894 Tm
+(") Tj
+1 0 0 1 142.53997 499.1894 Tm
+(c) Tj
+1 0 0 1 146.55997 499.1894 Tm
+(o) Tj
+1 0 0 1 150.57996 499.1894 Tm
+(n) Tj
+1 0 0 1 154.59995 499.1894 Tm
+(f) Tj
+1 0 0 1 158.61995 499.1894 Tm
+(i) Tj
+1 0 0 1 162.63996 499.1894 Tm
+(g) Tj
+1 0 0 1 166.65996 499.1894 Tm
+(u) Tj
+1 0 0 1 170.67996 499.1894 Tm
+(r) Tj
+1 0 0 1 174.69997 499.1894 Tm
+(e) Tj
+1 0 0 1 178.71997 499.1894 Tm
+(d) Tj
+1 0 0 1 182.73998 499.1894 Tm
+(") Tj
+1 0 0 1 186.75998 499.1894 Tm
+( ) Tj
+1 0 0 1 190.77999 499.1894 Tm
+(:) Tj
+1 0 0 1 194.79999 499.1894 Tm
+( ) Tj
+1 0 0 1 198.81999 499.1894 Tm
+(") Tj
+1 0 0 1 202.84 499.1894 Tm
+(m) Tj
+1 0 0 1 206.86 499.1894 Tm
+(i) Tj
+1 0 0 1 210.88 499.1894 Tm
+(s) Tj
+1 0 0 1 214.90001 499.1894 Tm
+(s) Tj
+1 0 0 1 218.92002 499.1894 Tm
+(i) Tj
+1 0 0 1 222.94002 499.1894 Tm
+(n) Tj
+1 0 0 1 226.96002 499.1894 Tm
+(g) Tj
+1 0 0 1 230.98003 499.1894 Tm
+(") Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 490.98939 Tm
+(}) Tj
+1 0 0 1 46.059999 490.98939 Tm
+(\)) Tj
+1 0 0 1 50.08 490.98939 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 482.78938 Tm
+(}) Tj
+1 0 0 1 38.02 482.78938 Tm
+(\)) Tj
+1 0 0 1 42.04 482.78938 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 466.38935 Tm
+(l) Tj
+1 0 0 1 38.02 466.38935 Tm
+(e) Tj
+1 0 0 1 42.04 466.38935 Tm
+(t) Tj
+1 0 0 1 46.059999 466.38935 Tm
+( ) Tj
+1 0 0 1 50.08 466.38935 Tm
+(p) Tj
+1 0 0 1 54.1 466.38935 Tm
+(o) Tj
+1 0 0 1 58.120004 466.38935 Tm
+(o) Tj
+1 0 0 1 62.14 466.38935 Tm
+(l) Tj
+1 0 0 1 66.16 466.38935 Tm
+( ) Tj
+1 0 0 1 70.18 466.38935 Tm
+(=) Tj
+1 0 0 1 74.2 466.38935 Tm
+( ) Tj
+1 0 0 1 78.22 466.38935 Tm
+(n) Tj
+1 0 0 1 82.240009 466.38935 Tm
+(u) Tj
+1 0 0 1 86.26 466.38935 Tm
+(l) Tj
+1 0 0 1 90.28 466.38935 Tm
+(l) Tj
+1 0 0 1 94.3 466.38935 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 449.98933 Tm
+(i) Tj
+1 0 0 1 38.02 449.98933 Tm
+(f) Tj
+1 0 0 1 42.04 449.98933 Tm
+( ) Tj
+1 0 0 1 46.059999 449.98933 Tm
+(\() Tj
+1 0 0 1 50.08 449.98933 Tm
+(D) Tj
+1 0 0 1 54.1 449.98933 Tm
+(A) Tj
+1 0 0 1 58.120004 449.98933 Tm
+(T) Tj
+1 0 0 1 62.14 449.98933 Tm
+(A) Tj
+1 0 0 1 66.16 449.98933 Tm
+(B) Tj
+1 0 0 1 70.18 449.98933 Tm
+(A) Tj
+1 0 0 1 74.2 449.98933 Tm
+(S) Tj
+1 0 0 1 78.22 449.98933 Tm
+(E) Tj
+1 0 0 1 82.240009 449.98933 Tm
+(_) Tj
+1 0 0 1 86.26 449.98933 Tm
+(U) Tj
+1 0 0 1 90.28 449.98933 Tm
+(R) Tj
+1 0 0 1 94.3 449.98933 Tm
+(L) Tj
+1 0 0 1 98.32 449.98933 Tm
+(\)) Tj
+1 0 0 1 102.34 449.98933 Tm
+( ) Tj
+1 0 0 1 106.35999 449.98933 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 441.7893 Tm
+(p) Tj
+1 0 0 1 46.059999 441.7893 Tm
+(o) Tj
+1 0 0 1 50.08 441.7893 Tm
+(o) Tj
+1 0 0 1 54.1 441.7893 Tm
+(l) Tj
+1 0 0 1 58.120004 441.7893 Tm
+( ) Tj
+1 0 0 1 62.14 441.7893 Tm
+(=) Tj
+1 0 0 1 66.16 441.7893 Tm
+( ) Tj
+1 0 0 1 70.18 441.7893 Tm
+(n) Tj
+1 0 0 1 74.2 441.7893 Tm
+(e) Tj
+1 0 0 1 78.22 441.7893 Tm
+(w) Tj
+1 0 0 1 82.240009 441.7893 Tm
+( ) Tj
+1 0 0 1 86.26 441.7893 Tm
+(P) Tj
+1 0 0 1 90.28 441.7893 Tm
+(o) Tj
+1 0 0 1 94.3 441.7893 Tm
+(o) Tj
+1 0 0 1 98.32 441.7893 Tm
+(l) Tj
+1 0 0 1 102.34 441.7893 Tm
+(\() Tj
+1 0 0 1 106.35999 441.7893 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 433.5893 Tm
+(c) Tj
+1 0 0 1 54.1 433.5893 Tm
+(o) Tj
+1 0 0 1 58.120004 433.5893 Tm
+(n) Tj
+1 0 0 1 62.14 433.5893 Tm
+(n) Tj
+1 0 0 1 66.16 433.5893 Tm
+(e) Tj
+1 0 0 1 70.18 433.5893 Tm
+(c) Tj
+1 0 0 1 74.2 433.5893 Tm
+(t) Tj
+1 0 0 1 78.22 433.5893 Tm
+(i) Tj
+1 0 0 1 82.240009 433.5893 Tm
+(o) Tj
+1 0 0 1 86.26 433.5893 Tm
+(n) Tj
+1 0 0 1 90.28 433.5893 Tm
+(S) Tj
+1 0 0 1 94.3 433.5893 Tm
+(t) Tj
+1 0 0 1 98.32 433.5893 Tm
+(r) Tj
+1 0 0 1 102.34 433.5893 Tm
+(i) Tj
+1 0 0 1 106.35999 433.5893 Tm
+(n) Tj
+1 0 0 1 110.37999 433.5893 Tm
+(g) Tj
+1 0 0 1 114.39999 433.5893 Tm
+(:) Tj
+1 0 0 1 118.41998 433.5893 Tm
+( ) Tj
+1 0 0 1 122.43998 433.5893 Tm
+(D) Tj
+1 0 0 1 126.45998 433.5893 Tm
+(A) Tj
+1 0 0 1 130.47998 433.5893 Tm
+(T) Tj
+1 0 0 1 134.49997 433.5893 Tm
+(A) Tj
+1 0 0 1 138.51996 433.5893 Tm
+(B) Tj
+1 0 0 1 142.53997 433.5893 Tm
+(A) Tj
+1 0 0 1 146.55997 433.5893 Tm
+(S) Tj
+1 0 0 1 150.57996 433.5893 Tm
+(E) Tj
+1 0 0 1 154.59995 433.5893 Tm
+(_) Tj
+1 0 0 1 158.61995 433.5893 Tm
+(U) Tj
+1 0 0 1 162.63996 433.5893 Tm
+(R) Tj
+1 0 0 1 166.65996 433.5893 Tm
+(L) Tj
+1 0 0 1 170.67996 433.5893 Tm
+(,) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 425.38929 Tm
+(s) Tj
+1 0 0 1 54.1 425.38929 Tm
+(s) Tj
+1 0 0 1 58.120004 425.38929 Tm
+(l) Tj
+1 0 0 1 62.14 425.38929 Tm
+(:) Tj
+1 0 0 1 66.16 425.38929 Tm
+( ) Tj
+1 0 0 1 70.18 425.38929 Tm
+({) Tj
+1 0 0 1 74.2 425.38929 Tm
+( ) Tj
+1 0 0 1 78.22 425.38929 Tm
+(r) Tj
+1 0 0 1 82.240009 425.38929 Tm
+(e) Tj
+1 0 0 1 86.26 425.38929 Tm
+(j) Tj
+1 0 0 1 90.28 425.38929 Tm
+(e) Tj
+1 0 0 1 94.3 425.38929 Tm
+(c) Tj
+1 0 0 1 98.32 425.38929 Tm
+(t) Tj
+1 0 0 1 102.34 425.38929 Tm
+(U) Tj
+1 0 0 1 106.35999 425.38929 Tm
+(n) Tj
+1 0 0 1 110.37999 425.38929 Tm
+(a) Tj
+1 0 0 1 114.39999 425.38929 Tm
+(u) Tj
+1 0 0 1 118.41998 425.38929 Tm
+(t) Tj
+1 0 0 1 122.43998 425.38929 Tm
+(h) Tj
+1 0 0 1 126.45998 425.38929 Tm
+(o) Tj
+1 0 0 1 130.47998 425.38929 Tm
+(r) Tj
+1 0 0 1 134.49997 425.38929 Tm
+(i) Tj
+1 0 0 1 138.51996 425.38929 Tm
+(z) Tj
+1 0 0 1 142.53997 425.38929 Tm
+(e) Tj
+1 0 0 1 146.55997 425.38929 Tm
+(d) Tj
+1 0 0 1 150.57996 425.38929 Tm
+(:) Tj
+1 0 0 1 154.59995 425.38929 Tm
+( ) Tj
+1 0 0 1 158.61995 425.38929 Tm
+(f) Tj
+1 0 0 1 162.63996 425.38929 Tm
+(a) Tj
+1 0 0 1 166.65996 425.38929 Tm
+(l) Tj
+1 0 0 1 170.67996 425.38929 Tm
+(s) Tj
+1 0 0 1 174.69997 425.38929 Tm
+(e) Tj
+1 0 0 1 178.71997 425.38929 Tm
+( ) Tj
+1 0 0 1 182.73998 425.38929 Tm
+(}) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 417.18928 Tm
+(}) Tj
+1 0 0 1 46.059999 417.18928 Tm
+(\)) Tj
+1 0 0 1 50.08 417.18928 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 400.78926 Tm
+(p) Tj
+1 0 0 1 46.059999 400.78926 Tm
+(o) Tj
+1 0 0 1 50.08 400.78926 Tm
+(o) Tj
+1 0 0 1 54.1 400.78926 Tm
+(l) Tj
+1 0 0 1 58.120004 400.78926 Tm
+(.) Tj
+1 0 0 1 62.14 400.78926 Tm
+(o) Tj
+1 0 0 1 66.16 400.78926 Tm
+(n) Tj
+1 0 0 1 70.18 400.78926 Tm
+(\() Tj
+1 0 0 1 74.2 400.78926 Tm
+(") Tj
+1 0 0 1 78.22 400.78926 Tm
+(e) Tj
+1 0 0 1 82.240009 400.78926 Tm
+(r) Tj
+1 0 0 1 86.26 400.78926 Tm
+(r) Tj
+1 0 0 1 90.28 400.78926 Tm
+(o) Tj
+1 0 0 1 94.3 400.78926 Tm
+(r) Tj
+1 0 0 1 98.32 400.78926 Tm
+(") Tj
+1 0 0 1 102.34 400.78926 Tm
+(,) Tj
+1 0 0 1 106.35999 400.78926 Tm
+( ) Tj
+1 0 0 1 110.37999 400.78926 Tm
+(\() Tj
+1 0 0 1 114.39999 400.78926 Tm
+(e) Tj
+1 0 0 1 118.41998 400.78926 Tm
+(r) Tj
+1 0 0 1 122.43998 400.78926 Tm
+(r) Tj
+1 0 0 1 126.45998 400.78926 Tm
+(o) Tj
+1 0 0 1 130.47998 400.78926 Tm
+(r) Tj
+1 0 0 1 134.49997 400.78926 Tm
+(\)) Tj
+1 0 0 1 138.51996 400.78926 Tm
+( ) Tj
+1 0 0 1 142.53997 400.78926 Tm
+(=) Tj
+1 0 0 1 146.55997 400.78926 Tm
+(>) Tj
+1 0 0 1 150.57996 400.78926 Tm
+( ) Tj
+1 0 0 1 154.59995 400.78926 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 392.58924 Tm
+(c) Tj
+1 0 0 1 54.1 392.58924 Tm
+(o) Tj
+1 0 0 1 58.120004 392.58924 Tm
+(n) Tj
+1 0 0 1 62.14 392.58924 Tm
+(s) Tj
+1 0 0 1 66.16 392.58924 Tm
+(o) Tj
+1 0 0 1 70.18 392.58924 Tm
+(l) Tj
+1 0 0 1 74.2 392.58924 Tm
+(e) Tj
+1 0 0 1 78.22 392.58924 Tm
+(.) Tj
+1 0 0 1 82.240009 392.58924 Tm
+(e) Tj
+1 0 0 1 86.26 392.58924 Tm
+(r) Tj
+1 0 0 1 90.28 392.58924 Tm
+(r) Tj
+1 0 0 1 94.3 392.58924 Tm
+(o) Tj
+1 0 0 1 98.32 392.58924 Tm
+(r) Tj
+1 0 0 1 102.34 392.58924 Tm
+(\() Tj
+1 0 0 1 106.35999 392.58924 Tm
+(") Tj
+/F4 6.7 Tf
+1 0 0 1 110.37999 392.58924 Tm
+(n) Tj
+/F3 6.7 Tf
+1 0 0 1 115.47869 392.58924 Tm
+( ) Tj
+1 0 0 1 119.49869 392.58924 Tm
+(P) Tj
+1 0 0 1 123.518688 392.58924 Tm
+(o) Tj
+1 0 0 1 127.53868 392.58924 Tm
+(s) Tj
+1 0 0 1 131.55869 392.58924 Tm
+(t) Tj
+1 0 0 1 135.57868 392.58924 Tm
+(g) Tj
+1 0 0 1 139.59867 392.58924 Tm
+(r) Tj
+1 0 0 1 143.61867 392.58924 Tm
+(e) Tj
+1 0 0 1 147.63867 392.58924 Tm
+(S) Tj
+1 0 0 1 151.65866 392.58924 Tm
+(Q) Tj
+1 0 0 1 155.67865 392.58924 Tm
+(L) Tj
+1 0 0 1 159.69866 392.58924 Tm
+(:) Tj
+1 0 0 1 163.71866 392.58924 Tm
+(") Tj
+1 0 0 1 167.73867 392.58924 Tm
+(,) Tj
+1 0 0 1 171.75867 392.58924 Tm
+( ) Tj
+1 0 0 1 175.77867 392.58924 Tm
+(e) Tj
+1 0 0 1 179.79868 392.58924 Tm
+(r) Tj
+1 0 0 1 183.81868 392.58924 Tm
+(r) Tj
+1 0 0 1 187.83869 392.58924 Tm
+(o) Tj
+1 0 0 1 191.85869 392.58924 Tm
+(r) Tj
+1 0 0 1 195.8787 392.58924 Tm
+(.) Tj
+1 0 0 1 199.8987 392.58924 Tm
+(m) Tj
+1 0 0 1 203.9187 392.58924 Tm
+(e) Tj
+1 0 0 1 207.9387 392.58924 Tm
+(s) Tj
+1 0 0 1 211.95871 392.58924 Tm
+(s) Tj
+1 0 0 1 215.97872 392.58924 Tm
+(a) Tj
+1 0 0 1 219.99872 392.58924 Tm
+(g) Tj
+1 0 0 1 224.01873 392.58924 Tm
+(e) Tj
+1 0 0 1 228.03873 392.58924 Tm
+(\)) Tj
+1 0 0 1 232.05873 392.58924 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 384.38923 Tm
+(}) Tj
+1 0 0 1 46.059999 384.38923 Tm
+(\)) Tj
+1 0 0 1 50.08 384.38923 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 376.1892 Tm
+(}) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 34 359.78919 Tm
+(a) Tj
+1 0 0 1 38.02 359.78919 Tm
+(s) Tj
+1 0 0 1 42.04 359.78919 Tm
+(y) Tj
+1 0 0 1 46.059999 359.78919 Tm
+(n) Tj
+1 0 0 1 50.08 359.78919 Tm
+(c) Tj
+1 0 0 1 54.1 359.78919 Tm
+( ) Tj
+1 0 0 1 58.120004 359.78919 Tm
+(f) Tj
+1 0 0 1 62.14 359.78919 Tm
+(u) Tj
+1 0 0 1 66.16 359.78919 Tm
+(n) Tj
+1 0 0 1 70.18 359.78919 Tm
+(c) Tj
+1 0 0 1 74.2 359.78919 Tm
+(t) Tj
+1 0 0 1 78.22 359.78919 Tm
+(i) Tj
+1 0 0 1 82.240009 359.78919 Tm
+(o) Tj
+1 0 0 1 86.26 359.78919 Tm
+(n) Tj
+1 0 0 1 90.28 359.78919 Tm
+( ) Tj
+1 0 0 1 94.3 359.78919 Tm
+(i) Tj
+1 0 0 1 98.32 359.78919 Tm
+(n) Tj
+1 0 0 1 102.34 359.78919 Tm
+(i) Tj
+1 0 0 1 106.35999 359.78919 Tm
+(t) Tj
+1 0 0 1 110.37999 359.78919 Tm
+(D) Tj
+1 0 0 1 114.39999 359.78919 Tm
+(a) Tj
+1 0 0 1 118.41998 359.78919 Tm
+(t) Tj
+1 0 0 1 122.43998 359.78919 Tm
+(a) Tj
+1 0 0 1 126.45998 359.78919 Tm
+(b) Tj
+1 0 0 1 130.47998 359.78919 Tm
+(a) Tj
+1 0 0 1 134.49997 359.78919 Tm
+(s) Tj
+1 0 0 1 138.51996 359.78919 Tm
+(e) Tj
+1 0 0 1 142.53997 359.78919 Tm
+(\() Tj
+1 0 0 1 146.55997 359.78919 Tm
+(\)) Tj
+1 0 0 1 150.57996 359.78919 Tm
+( ) Tj
+1 0 0 1 154.59995 359.78919 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 351.58918 Tm
+(i) Tj
+1 0 0 1 46.059999 351.58918 Tm
+(f) Tj
+1 0 0 1 50.08 351.58918 Tm
+( ) Tj
+1 0 0 1 54.1 351.58918 Tm
+(\() Tj
+1 0 0 1 58.120004 351.58918 Tm
+(!) Tj
+1 0 0 1 62.14 351.58918 Tm
+(p) Tj
+1 0 0 1 66.16 351.58918 Tm
+(o) Tj
+1 0 0 1 70.18 351.58918 Tm
+(o) Tj
+1 0 0 1 74.2 351.58918 Tm
+(l) Tj
+1 0 0 1 78.22 351.58918 Tm
+(\)) Tj
+1 0 0 1 82.240009 351.58918 Tm
+( ) Tj
+1 0 0 1 86.26 351.58918 Tm
+({) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 343.38917 Tm
+(c) Tj
+1 0 0 1 54.1 343.38917 Tm
+(o) Tj
+1 0 0 1 58.120004 343.38917 Tm
+(n) Tj
+1 0 0 1 62.14 343.38917 Tm
+(s) Tj
+1 0 0 1 66.16 343.38917 Tm
+(o) Tj
+1 0 0 1 70.18 343.38917 Tm
+(l) Tj
+1 0 0 1 74.2 343.38917 Tm
+(e) Tj
+1 0 0 1 78.22 343.38917 Tm
+(.) Tj
+1 0 0 1 82.240009 343.38917 Tm
+(l) Tj
+1 0 0 1 86.26 343.38917 Tm
+(o) Tj
+1 0 0 1 90.28 343.38917 Tm
+(g) Tj
+1 0 0 1 94.3 343.38917 Tm
+(\() Tj
+1 0 0 1 98.32 343.38917 Tm
+(") Tj
+/F4 6.7 Tf
+1 0 0 1 102.34 343.38917 Tm
+(n) Tj
+1 0 0 1 107.4387 343.38917 Tm
+(n) Tj
+/F3 6.7 Tf
+1 0 0 1 112.5374 343.38917 Tm
+( ) Tj
+1 0 0 1 116.557399 343.38917 Tm
+(D) Tj
+1 0 0 1 120.57739 343.38917 Tm
+(A) Tj
+1 0 0 1 124.59739 343.38917 Tm
+(T) Tj
+1 0 0 1 128.61739 343.38917 Tm
+(A) Tj
+1 0 0 1 132.63739 343.38917 Tm
+(B) Tj
+1 0 0 1 136.65738 343.38917 Tm
+(A) Tj
+1 0 0 1 140.67737 343.38917 Tm
+(S) Tj
+1 0 0 1 144.69738 343.38917 Tm
+(E) Tj
+1 0 0 1 148.71738 343.38917 Tm
+(_) Tj
+1 0 0 1 152.73737 343.38917 Tm
+(U) Tj
+1 0 0 1 156.75736 343.38917 Tm
+(R) Tj
+1 0 0 1 160.77736 343.38917 Tm
+(L) Tj
+1 0 0 1 164.79737 343.38917 Tm
+( ) Tj
+1 0 0 1 168.81737 343.38917 Tm
+(m) Tj
+1 0 0 1 172.83737 343.38917 Tm
+(a) Tj
+1 0 0 1 176.85738 343.38917 Tm
+(v) Tj
+1 0 0 1 180.87738 343.38917 Tm
+(j) Tj
+1 0 0 1 184.89739 343.38917 Tm
+(u) Tj
+1 0 0 1 188.91739 343.38917 Tm
+(d) Tj
+1 0 0 1 192.9374 343.38917 Tm
+( ) Tj
+1 0 0 1 196.9574 343.38917 Tm
+(e) Tj
+1 0 0 1 200.9774 343.38917 Tm
+(m) Tj
+1 0 0 1 204.9974 343.38917 Tm
+(a) Tj
+1 0 0 1 209.01741 343.38917 Tm
+(s) Tj
+1 0 0 1 213.03742 343.38917 Tm
+(.) Tj
+1 0 0 1 217.05742 343.38917 Tm
+(") Tj
+1 0 0 1 221.07743 343.38917 Tm
+(\)) Tj
+1 0 0 1 225.09743 343.38917 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 335.18916 Tm
+(r) Tj
+1 0 0 1 54.1 335.18916 Tm
+(e) Tj
+1 0 0 1 58.120004 335.18916 Tm
+(t) Tj
+1 0 0 1 62.14 335.18916 Tm
+(u) Tj
+1 0 0 1 66.16 335.18916 Tm
+(r) Tj
+1 0 0 1 70.18 335.18916 Tm
+(n) Tj
+1 0 0 1 74.2 335.18916 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 326.98915 Tm
+(}) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 310.5891 Tm
+(a) Tj
+1 0 0 1 46.059999 310.5891 Tm
+(w) Tj
+1 0 0 1 50.08 310.5891 Tm
+(a) Tj
+1 0 0 1 54.1 310.5891 Tm
+(i) Tj
+1 0 0 1 58.120004 310.5891 Tm
+(t) Tj
+1 0 0 1 62.14 310.5891 Tm
+( ) Tj
+1 0 0 1 66.16 310.5891 Tm
+(p) Tj
+1 0 0 1 70.18 310.5891 Tm
+(o) Tj
+1 0 0 1 74.2 310.5891 Tm
+(o) Tj
+1 0 0 1 78.22 310.5891 Tm
+(l) Tj
+1 0 0 1 82.240009 310.5891 Tm
+(.) Tj
+1 0 0 1 86.26 310.5891 Tm
+(q) Tj
+1 0 0 1 90.28 310.5891 Tm
+(u) Tj
+1 0 0 1 94.3 310.5891 Tm
+(e) Tj
+1 0 0 1 98.32 310.5891 Tm
+(r) Tj
+1 0 0 1 102.34 310.5891 Tm
+(y) Tj
+1 0 0 1 106.35999 310.5891 Tm
+(\() Tj
+1 0 0 1 110.37999 310.5891 Tm
+(") Tj
+1 0 0 1 114.39999 310.5891 Tm
+(S) Tj
+1 0 0 1 118.41998 310.5891 Tm
+(E) Tj
+1 0 0 1 122.43998 310.5891 Tm
+(L) Tj
+1 0 0 1 126.45998 310.5891 Tm
+(E) Tj
+1 0 0 1 130.47998 310.5891 Tm
+(C) Tj
+1 0 0 1 134.49997 310.5891 Tm
+(T) Tj
+1 0 0 1 138.51996 310.5891 Tm
+( ) Tj
+1 0 0 1 142.53997 310.5891 Tm
+(N) Tj
+1 0 0 1 146.55997 310.5891 Tm
+(O) Tj
+1 0 0 1 150.57996 310.5891 Tm
+(W) Tj
+1 0 0 1 154.59995 310.5891 Tm
+(\() Tj
+1 0 0 1 158.61995 310.5891 Tm
+(\)) Tj
+1 0 0 1 162.63996 310.5891 Tm
+(") Tj
+1 0 0 1 166.65996 310.5891 Tm
+(\)) Tj
+1 0 0 1 170.67996 310.5891 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 302.3891 Tm
+(c) Tj
+1 0 0 1 46.059999 302.3891 Tm
+(o) Tj
+1 0 0 1 50.08 302.3891 Tm
+(n) Tj
+1 0 0 1 54.1 302.3891 Tm
+(s) Tj
+1 0 0 1 58.120004 302.3891 Tm
+(o) Tj
+1 0 0 1 62.14 302.3891 Tm
+(l) Tj
+1 0 0 1 66.16 302.3891 Tm
+(e) Tj
+1 0 0 1 70.18 302.3891 Tm
+(.) Tj
+1 0 0 1 74.2 302.3891 Tm
+(l) Tj
+1 0 0 1 78.22 302.3891 Tm
+(o) Tj
+1 0 0 1 82.240009 302.3891 Tm
+(g) Tj
+1 0 0 1 86.26 302.3891 Tm
+(\() Tj
+1 0 0 1 90.28 302.3891 Tm
+(") Tj
+/F4 6.7 Tf
+1 0 0 1 94.3 302.3891 Tm
+(n) Tj
+/F3 6.7 Tf
+1 0 0 1 99.398708 302.3891 Tm
+( ) Tj
+1 0 0 1 103.4187 302.3891 Tm
+(P) Tj
+1 0 0 1 107.4387 302.3891 Tm
+(o) Tj
+1 0 0 1 111.458698 302.3891 Tm
+(s) Tj
+1 0 0 1 115.47869 302.3891 Tm
+(t) Tj
+1 0 0 1 119.49869 302.3891 Tm
+(g) Tj
+1 0 0 1 123.518688 302.3891 Tm
+(r) Tj
+1 0 0 1 127.53868 302.3891 Tm
+(e) Tj
+1 0 0 1 131.55869 302.3891 Tm
+(S) Tj
+1 0 0 1 135.57868 302.3891 Tm
+(Q) Tj
+1 0 0 1 139.59867 302.3891 Tm
+(L) Tj
+1 0 0 1 143.61867 302.3891 Tm
+( ) Tj
+1 0 0 1 147.63867 302.3891 Tm
+(u) Tj
+1 0 0 1 151.65866 302.3891 Tm
+(l) Tj
+1 0 0 1 155.67865 302.3891 Tm
+(a) Tj
+1 0 0 1 159.69866 302.3891 Tm
+(n) Tj
+1 0 0 1 163.71866 302.3891 Tm
+(d) Tj
+1 0 0 1 167.73867 302.3891 Tm
+(i) Tj
+1 0 0 1 171.75867 302.3891 Tm
+(") Tj
+1 0 0 1 175.77867 302.3891 Tm
+(\)) Tj
+1 0 0 1 179.79868 302.3891 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 285.98915 Tm
+(a) Tj
+1 0 0 1 46.059999 285.98915 Tm
+(w) Tj
+1 0 0 1 50.08 285.98915 Tm
+(a) Tj
+1 0 0 1 54.1 285.98915 Tm
+(i) Tj
+1 0 0 1 58.120004 285.98915 Tm
+(t) Tj
+1 0 0 1 62.14 285.98915 Tm
+( ) Tj
+1 0 0 1 66.16 285.98915 Tm
+(p) Tj
+1 0 0 1 70.18 285.98915 Tm
+(o) Tj
+1 0 0 1 74.2 285.98915 Tm
+(o) Tj
+1 0 0 1 78.22 285.98915 Tm
+(l) Tj
+1 0 0 1 82.240009 285.98915 Tm
+(.) Tj
+1 0 0 1 86.26 285.98915 Tm
+(q) Tj
+1 0 0 1 90.28 285.98915 Tm
+(u) Tj
+1 0 0 1 94.3 285.98915 Tm
+(e) Tj
+1 0 0 1 98.32 285.98915 Tm
+(r) Tj
+1 0 0 1 102.34 285.98915 Tm
+(y) Tj
+1 0 0 1 106.35999 285.98915 Tm
+(\() Tj
+1 0 0 1 110.37999 285.98915 Tm
+(`) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 277.78913 Tm
+(C) Tj
+1 0 0 1 54.1 277.78913 Tm
+(R) Tj
+1 0 0 1 58.120004 277.78913 Tm
+(E) Tj
+1 0 0 1 62.14 277.78913 Tm
+(A) Tj
+1 0 0 1 66.16 277.78913 Tm
+(T) Tj
+1 0 0 1 70.18 277.78913 Tm
+(E) Tj
+1 0 0 1 74.2 277.78913 Tm
+( ) Tj
+1 0 0 1 78.22 277.78913 Tm
+(T) Tj
+1 0 0 1 82.240009 277.78913 Tm
+(A) Tj
+1 0 0 1 86.26 277.78913 Tm
+(B) Tj
+1 0 0 1 90.28 277.78913 Tm
+(L) Tj
+1 0 0 1 94.3 277.78913 Tm
+(E) Tj
+1 0 0 1 98.32 277.78913 Tm
+( ) Tj
+1 0 0 1 102.34 277.78913 Tm
+(I) Tj
+1 0 0 1 106.35999 277.78913 Tm
+(F) Tj
+1 0 0 1 110.37999 277.78913 Tm
+( ) Tj
+1 0 0 1 114.39999 277.78913 Tm
+(N) Tj
+1 0 0 1 118.41998 277.78913 Tm
+(O) Tj
+1 0 0 1 122.43998 277.78913 Tm
+(T) Tj
+1 0 0 1 126.45998 277.78913 Tm
+( ) Tj
+1 0 0 1 130.47998 277.78913 Tm
+(E) Tj
+1 0 0 1 134.49997 277.78913 Tm
+(X) Tj
+1 0 0 1 138.51996 277.78913 Tm
+(I) Tj
+1 0 0 1 142.53997 277.78913 Tm
+(S) Tj
+1 0 0 1 146.55997 277.78913 Tm
+(T) Tj
+1 0 0 1 150.57996 277.78913 Tm
+(S) Tj
+1 0 0 1 154.59995 277.78913 Tm
+( ) Tj
+1 0 0 1 158.61995 277.78913 Tm
+(u) Tj
+1 0 0 1 162.63996 277.78913 Tm
+(s) Tj
+1 0 0 1 166.65996 277.78913 Tm
+(e) Tj
+1 0 0 1 170.67996 277.78913 Tm
+(r) Tj
+1 0 0 1 174.69997 277.78913 Tm
+(s) Tj
+1 0 0 1 178.71997 277.78913 Tm
+( ) Tj
+1 0 0 1 182.73998 277.78913 Tm
+(\() Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 58.120004 269.5891 Tm
+(i) Tj
+1 0 0 1 62.14 269.5891 Tm
+(d) Tj
+1 0 0 1 66.16 269.5891 Tm
+( ) Tj
+1 0 0 1 70.18 269.5891 Tm
+(S) Tj
+1 0 0 1 74.2 269.5891 Tm
+(E) Tj
+1 0 0 1 78.22 269.5891 Tm
+(R) Tj
+1 0 0 1 82.240009 269.5891 Tm
+(I) Tj
+1 0 0 1 86.26 269.5891 Tm
+(A) Tj
+1 0 0 1 90.28 269.5891 Tm
+(L) Tj
+1 0 0 1 94.3 269.5891 Tm
+( ) Tj
+1 0 0 1 98.32 269.5891 Tm
+(P) Tj
+1 0 0 1 102.34 269.5891 Tm
+(R) Tj
+1 0 0 1 106.35999 269.5891 Tm
+(I) Tj
+1 0 0 1 110.37999 269.5891 Tm
+(M) Tj
+1 0 0 1 114.39999 269.5891 Tm
+(A) Tj
+1 0 0 1 118.41998 269.5891 Tm
+(R) Tj
+1 0 0 1 122.43998 269.5891 Tm
+(Y) Tj
+1 0 0 1 126.45998 269.5891 Tm
+( ) Tj
+1 0 0 1 130.47998 269.5891 Tm
+(K) Tj
+1 0 0 1 134.49997 269.5891 Tm
+(E) Tj
+1 0 0 1 138.51996 269.5891 Tm
+(Y) Tj
+1 0 0 1 142.53997 269.5891 Tm
+(,) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 58.120004 261.3891 Tm
+(t) Tj
+1 0 0 1 62.14 261.3891 Tm
+(e) Tj
+1 0 0 1 66.16 261.3891 Tm
+(l) Tj
+1 0 0 1 70.18 261.3891 Tm
+(e) Tj
+1 0 0 1 74.2 261.3891 Tm
+(g) Tj
+1 0 0 1 78.22 261.3891 Tm
+(r) Tj
+1 0 0 1 82.240009 261.3891 Tm
+(a) Tj
+1 0 0 1 86.26 261.3891 Tm
+(m) Tj
+1 0 0 1 90.28 261.3891 Tm
+(_) Tj
+1 0 0 1 94.3 261.3891 Tm
+(i) Tj
+1 0 0 1 98.32 261.3891 Tm
+(d) Tj
+1 0 0 1 102.34 261.3891 Tm
+( ) Tj
+1 0 0 1 106.35999 261.3891 Tm
+(B) Tj
+1 0 0 1 110.37999 261.3891 Tm
+(I) Tj
+1 0 0 1 114.39999 261.3891 Tm
+(G) Tj
+1 0 0 1 118.41998 261.3891 Tm
+(I) Tj
+1 0 0 1 122.43998 261.3891 Tm
+(N) Tj
+1 0 0 1 126.45998 261.3891 Tm
+(T) Tj
+1 0 0 1 130.47998 261.3891 Tm
+( ) Tj
+1 0 0 1 134.49997 261.3891 Tm
+(U) Tj
+1 0 0 1 138.51996 261.3891 Tm
+(N) Tj
+1 0 0 1 142.53997 261.3891 Tm
+(I) Tj
+1 0 0 1 146.55997 261.3891 Tm
+(Q) Tj
+1 0 0 1 150.57996 261.3891 Tm
+(U) Tj
+1 0 0 1 154.59995 261.3891 Tm
+(E) Tj
+1 0 0 1 158.61995 261.3891 Tm
+(,) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 58.120004 253.18909 Tm
+(f) Tj
+1 0 0 1 62.14 253.18909 Tm
+(u) Tj
+1 0 0 1 66.16 253.18909 Tm
+(l) Tj
+1 0 0 1 70.18 253.18909 Tm
+(l) Tj
+1 0 0 1 74.2 253.18909 Tm
+(_) Tj
+1 0 0 1 78.22 253.18909 Tm
+(n) Tj
+1 0 0 1 82.240009 253.18909 Tm
+(a) Tj
+1 0 0 1 86.26 253.18909 Tm
+(m) Tj
+1 0 0 1 90.28 253.18909 Tm
+(e) Tj
+1 0 0 1 94.3 253.18909 Tm
+( ) Tj
+1 0 0 1 98.32 253.18909 Tm
+(T) Tj
+1 0 0 1 102.34 253.18909 Tm
+(E) Tj
+1 0 0 1 106.35999 253.18909 Tm
+(X) Tj
+1 0 0 1 110.37999 253.18909 Tm
+(T) Tj
+1 0 0 1 114.39999 253.18909 Tm
+(,) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 58.120004 244.98914 Tm
+(u) Tj
+1 0 0 1 62.14 244.98914 Tm
+(s) Tj
+1 0 0 1 66.16 244.98914 Tm
+(e) Tj
+1 0 0 1 70.18 244.98914 Tm
+(r) Tj
+1 0 0 1 74.2 244.98914 Tm
+(n) Tj
+1 0 0 1 78.22 244.98914 Tm
+(a) Tj
+1 0 0 1 82.240009 244.98914 Tm
+(m) Tj
+1 0 0 1 86.26 244.98914 Tm
+(e) Tj
+1 0 0 1 90.28 244.98914 Tm
+( ) Tj
+1 0 0 1 94.3 244.98914 Tm
+(T) Tj
+1 0 0 1 98.32 244.98914 Tm
+(E) Tj
+1 0 0 1 102.34 244.98914 Tm
+(X) Tj
+1 0 0 1 106.35999 244.98914 Tm
+(T) Tj
+1 0 0 1 110.37999 244.98914 Tm
+(,) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 58.120004 236.78913 Tm
+(c) Tj
+1 0 0 1 62.14 236.78913 Tm
+(r) Tj
+1 0 0 1 66.16 236.78913 Tm
+(e) Tj
+1 0 0 1 70.18 236.78913 Tm
+(a) Tj
+1 0 0 1 74.2 236.78913 Tm
+(t) Tj
+1 0 0 1 78.22 236.78913 Tm
+(e) Tj
+1 0 0 1 82.240009 236.78913 Tm
+(d) Tj
+1 0 0 1 86.26 236.78913 Tm
+(_) Tj
+1 0 0 1 90.28 236.78913 Tm
+(a) Tj
+1 0 0 1 94.3 236.78913 Tm
+(t) Tj
+1 0 0 1 98.32 236.78913 Tm
+( ) Tj
+1 0 0 1 102.34 236.78913 Tm
+(T) Tj
+1 0 0 1 106.35999 236.78913 Tm
+(I) Tj
+1 0 0 1 110.37999 236.78913 Tm
+(M) Tj
+1 0 0 1 114.39999 236.78913 Tm
+(E) Tj
+1 0 0 1 118.41998 236.78913 Tm
+(S) Tj
+1 0 0 1 122.43998 236.78913 Tm
+(T) Tj
+1 0 0 1 126.45998 236.78913 Tm
+(A) Tj
+1 0 0 1 130.47998 236.78913 Tm
+(M) Tj
+1 0 0 1 134.49997 236.78913 Tm
+(P) Tj
+1 0 0 1 138.51996 236.78913 Tm
+( ) Tj
+1 0 0 1 142.53997 236.78913 Tm
+(D) Tj
+1 0 0 1 146.55997 236.78913 Tm
+(E) Tj
+1 0 0 1 150.57996 236.78913 Tm
+(F) Tj
+1 0 0 1 154.59995 236.78913 Tm
+(A) Tj
+1 0 0 1 158.61995 236.78913 Tm
+(U) Tj
+1 0 0 1 162.63996 236.78913 Tm
+(L) Tj
+1 0 0 1 166.65996 236.78913 Tm
+(T) Tj
+1 0 0 1 170.67996 236.78913 Tm
+( ) Tj
+1 0 0 1 174.69997 236.78913 Tm
+(C) Tj
+1 0 0 1 178.71997 236.78913 Tm
+(U) Tj
+1 0 0 1 182.73998 236.78913 Tm
+(R) Tj
+1 0 0 1 186.75998 236.78913 Tm
+(R) Tj
+1 0 0 1 190.77999 236.78913 Tm
+(E) Tj
+1 0 0 1 194.79999 236.78913 Tm
+(N) Tj
+1 0 0 1 198.81999 236.78913 Tm
+(T) Tj
+1 0 0 1 202.84 236.78913 Tm
+(_) Tj
+1 0 0 1 206.86 236.78913 Tm
+(T) Tj
+1 0 0 1 210.88 236.78913 Tm
+(I) Tj
+1 0 0 1 214.90001 236.78913 Tm
+(M) Tj
+1 0 0 1 218.92002 236.78913 Tm
+(E) Tj
+1 0 0 1 222.94002 236.78913 Tm
+(S) Tj
+1 0 0 1 226.96002 236.78913 Tm
+(T) Tj
+1 0 0 1 230.98003 236.78913 Tm
+(A) Tj
+1 0 0 1 235.00003 236.78913 Tm
+(M) Tj
+1 0 0 1 239.02004 236.78913 Tm
+(P) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 228.58911 Tm
+(\)) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 220.38916 Tm
+(`) Tj
+1 0 0 1 46.059999 220.38916 Tm
+(\)) Tj
+1 0 0 1 50.08 220.38916 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 203.98914 Tm
+(a) Tj
+1 0 0 1 46.059999 203.98914 Tm
+(w) Tj
+1 0 0 1 50.08 203.98914 Tm
+(a) Tj
+1 0 0 1 54.1 203.98914 Tm
+(i) Tj
+1 0 0 1 58.120004 203.98914 Tm
+(t) Tj
+1 0 0 1 62.14 203.98914 Tm
+( ) Tj
+1 0 0 1 66.16 203.98914 Tm
+(p) Tj
+1 0 0 1 70.18 203.98914 Tm
+(o) Tj
+1 0 0 1 74.2 203.98914 Tm
+(o) Tj
+1 0 0 1 78.22 203.98914 Tm
+(l) Tj
+1 0 0 1 82.240009 203.98914 Tm
+(.) Tj
+1 0 0 1 86.26 203.98914 Tm
+(q) Tj
+1 0 0 1 90.28 203.98914 Tm
+(u) Tj
+1 0 0 1 94.3 203.98914 Tm
+(e) Tj
+1 0 0 1 98.32 203.98914 Tm
+(r) Tj
+1 0 0 1 102.34 203.98914 Tm
+(y) Tj
+1 0 0 1 106.35999 203.98914 Tm
+(\() Tj
+1 0 0 1 110.37999 203.98914 Tm
+(`) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 195.78913 Tm
+(A) Tj
+1 0 0 1 54.1 195.78913 Tm
+(L) Tj
+1 0 0 1 58.120004 195.78913 Tm
+(T) Tj
+1 0 0 1 62.14 195.78913 Tm
+(E) Tj
+1 0 0 1 66.16 195.78913 Tm
+(R) Tj
+1 0 0 1 70.18 195.78913 Tm
+( ) Tj
+1 0 0 1 74.2 195.78913 Tm
+(T) Tj
+1 0 0 1 78.22 195.78913 Tm
+(A) Tj
+1 0 0 1 82.240009 195.78913 Tm
+(B) Tj
+1 0 0 1 86.26 195.78913 Tm
+(L) Tj
+1 0 0 1 90.28 195.78913 Tm
+(E) Tj
+1 0 0 1 94.3 195.78913 Tm
+( ) Tj
+1 0 0 1 98.32 195.78913 Tm
+(u) Tj
+1 0 0 1 102.34 195.78913 Tm
+(s) Tj
+1 0 0 1 106.35999 195.78913 Tm
+(e) Tj
+1 0 0 1 110.37999 195.78913 Tm
+(r) Tj
+1 0 0 1 114.39999 195.78913 Tm
+(s) Tj
+1 0 0 1 118.41998 195.78913 Tm
+( ) Tj
+1 0 0 1 122.43998 195.78913 Tm
+(A) Tj
+1 0 0 1 126.45998 195.78913 Tm
+(D) Tj
+1 0 0 1 130.47998 195.78913 Tm
+(D) Tj
+1 0 0 1 134.49997 195.78913 Tm
+( ) Tj
+1 0 0 1 138.51996 195.78913 Tm
+(C) Tj
+1 0 0 1 142.53997 195.78913 Tm
+(O) Tj
+1 0 0 1 146.55997 195.78913 Tm
+(L) Tj
+1 0 0 1 150.57996 195.78913 Tm
+(U) Tj
+1 0 0 1 154.59995 195.78913 Tm
+(M) Tj
+1 0 0 1 158.61995 195.78913 Tm
+(N) Tj
+1 0 0 1 162.63996 195.78913 Tm
+( ) Tj
+1 0 0 1 166.65996 195.78913 Tm
+(I) Tj
+1 0 0 1 170.67996 195.78913 Tm
+(F) Tj
+1 0 0 1 174.69997 195.78913 Tm
+( ) Tj
+1 0 0 1 178.71997 195.78913 Tm
+(N) Tj
+1 0 0 1 182.73998 195.78913 Tm
+(O) Tj
+1 0 0 1 186.75998 195.78913 Tm
+(T) Tj
+1 0 0 1 190.77999 195.78913 Tm
+( ) Tj
+1 0 0 1 194.79999 195.78913 Tm
+(E) Tj
+1 0 0 1 198.81999 195.78913 Tm
+(X) Tj
+1 0 0 1 202.84 195.78913 Tm
+(I) Tj
+1 0 0 1 206.86 195.78913 Tm
+(S) Tj
+1 0 0 1 210.88 195.78913 Tm
+(T) Tj
+1 0 0 1 214.90001 195.78913 Tm
+(S) Tj
+1 0 0 1 218.92002 195.78913 Tm
+( ) Tj
+1 0 0 1 222.94002 195.78913 Tm
+(t) Tj
+1 0 0 1 226.96002 195.78913 Tm
+(e) Tj
+1 0 0 1 230.98003 195.78913 Tm
+(l) Tj
+1 0 0 1 235.00003 195.78913 Tm
+(e) Tj
+1 0 0 1 239.02004 195.78913 Tm
+(g) Tj
+1 0 0 1 243.04004 195.78913 Tm
+(r) Tj
+1 0 0 1 247.06005 195.78913 Tm
+(a) Tj
+1 0 0 1 251.08005 195.78913 Tm
+(m) Tj
+1 0 0 1 255.10005 195.78913 Tm
+(_) Tj
+1 0 0 1 259.12007 195.78913 Tm
+(i) Tj
+1 0 0 1 263.14009 195.78913 Tm
+(d) Tj
+1 0 0 1 267.16007 195.78913 Tm
+( ) Tj
+1 0 0 1 271.18006 195.78913 Tm
+(B) Tj
+1 0 0 1 275.20008 195.78913 Tm
+(I) Tj
+1 0 0 1 279.2201 195.78913 Tm
+(G) Tj
+1 0 0 1 283.24009 195.78913 Tm
+(I) Tj
+1 0 0 1 287.26008 195.78913 Tm
+(N) Tj
+1 0 0 1 291.2801 195.78913 Tm
+(T) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 187.58911 Tm
+(`) Tj
+1 0 0 1 46.059999 187.58911 Tm
+(\)) Tj
+1 0 0 1 50.08 187.58911 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 179.38916 Tm
+(a) Tj
+1 0 0 1 46.059999 179.38916 Tm
+(w) Tj
+1 0 0 1 50.08 179.38916 Tm
+(a) Tj
+1 0 0 1 54.1 179.38916 Tm
+(i) Tj
+1 0 0 1 58.120004 179.38916 Tm
+(t) Tj
+1 0 0 1 62.14 179.38916 Tm
+( ) Tj
+1 0 0 1 66.16 179.38916 Tm
+(p) Tj
+1 0 0 1 70.18 179.38916 Tm
+(o) Tj
+1 0 0 1 74.2 179.38916 Tm
+(o) Tj
+1 0 0 1 78.22 179.38916 Tm
+(l) Tj
+1 0 0 1 82.240009 179.38916 Tm
+(.) Tj
+1 0 0 1 86.26 179.38916 Tm
+(q) Tj
+1 0 0 1 90.28 179.38916 Tm
+(u) Tj
+1 0 0 1 94.3 179.38916 Tm
+(e) Tj
+1 0 0 1 98.32 179.38916 Tm
+(r) Tj
+1 0 0 1 102.34 179.38916 Tm
+(y) Tj
+1 0 0 1 106.35999 179.38916 Tm
+(\() Tj
+1 0 0 1 110.37999 179.38916 Tm
+(`) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 171.18915 Tm
+(A) Tj
+1 0 0 1 54.1 171.18915 Tm
+(L) Tj
+1 0 0 1 58.120004 171.18915 Tm
+(T) Tj
+1 0 0 1 62.14 171.18915 Tm
+(E) Tj
+1 0 0 1 66.16 171.18915 Tm
+(R) Tj
+1 0 0 1 70.18 171.18915 Tm
+( ) Tj
+1 0 0 1 74.2 171.18915 Tm
+(T) Tj
+1 0 0 1 78.22 171.18915 Tm
+(A) Tj
+1 0 0 1 82.240009 171.18915 Tm
+(B) Tj
+1 0 0 1 86.26 171.18915 Tm
+(L) Tj
+1 0 0 1 90.28 171.18915 Tm
+(E) Tj
+1 0 0 1 94.3 171.18915 Tm
+( ) Tj
+1 0 0 1 98.32 171.18915 Tm
+(u) Tj
+1 0 0 1 102.34 171.18915 Tm
+(s) Tj
+1 0 0 1 106.35999 171.18915 Tm
+(e) Tj
+1 0 0 1 110.37999 171.18915 Tm
+(r) Tj
+1 0 0 1 114.39999 171.18915 Tm
+(s) Tj
+1 0 0 1 118.41998 171.18915 Tm
+( ) Tj
+1 0 0 1 122.43998 171.18915 Tm
+(A) Tj
+1 0 0 1 126.45998 171.18915 Tm
+(D) Tj
+1 0 0 1 130.47998 171.18915 Tm
+(D) Tj
+1 0 0 1 134.49997 171.18915 Tm
+( ) Tj
+1 0 0 1 138.51996 171.18915 Tm
+(C) Tj
+1 0 0 1 142.53997 171.18915 Tm
+(O) Tj
+1 0 0 1 146.55997 171.18915 Tm
+(L) Tj
+1 0 0 1 150.57996 171.18915 Tm
+(U) Tj
+1 0 0 1 154.59995 171.18915 Tm
+(M) Tj
+1 0 0 1 158.61995 171.18915 Tm
+(N) Tj
+1 0 0 1 162.63996 171.18915 Tm
+( ) Tj
+1 0 0 1 166.65996 171.18915 Tm
+(I) Tj
+1 0 0 1 170.67996 171.18915 Tm
+(F) Tj
+1 0 0 1 174.69997 171.18915 Tm
+( ) Tj
+1 0 0 1 178.71997 171.18915 Tm
+(N) Tj
+1 0 0 1 182.73998 171.18915 Tm
+(O) Tj
+1 0 0 1 186.75998 171.18915 Tm
+(T) Tj
+1 0 0 1 190.77999 171.18915 Tm
+( ) Tj
+1 0 0 1 194.79999 171.18915 Tm
+(E) Tj
+1 0 0 1 198.81999 171.18915 Tm
+(X) Tj
+1 0 0 1 202.84 171.18915 Tm
+(I) Tj
+1 0 0 1 206.86 171.18915 Tm
+(S) Tj
+1 0 0 1 210.88 171.18915 Tm
+(T) Tj
+1 0 0 1 214.90001 171.18915 Tm
+(S) Tj
+1 0 0 1 218.92002 171.18915 Tm
+( ) Tj
+1 0 0 1 222.94002 171.18915 Tm
+(f) Tj
+1 0 0 1 226.96002 171.18915 Tm
+(u) Tj
+1 0 0 1 230.98003 171.18915 Tm
+(l) Tj
+1 0 0 1 235.00003 171.18915 Tm
+(l) Tj
+1 0 0 1 239.02004 171.18915 Tm
+(_) Tj
+1 0 0 1 243.04004 171.18915 Tm
+(n) Tj
+1 0 0 1 247.06005 171.18915 Tm
+(a) Tj
+1 0 0 1 251.08005 171.18915 Tm
+(m) Tj
+1 0 0 1 255.10005 171.18915 Tm
+(e) Tj
+1 0 0 1 259.12007 171.18915 Tm
+( ) Tj
+1 0 0 1 263.14009 171.18915 Tm
+(T) Tj
+1 0 0 1 267.16007 171.18915 Tm
+(E) Tj
+1 0 0 1 271.18006 171.18915 Tm
+(X) Tj
+1 0 0 1 275.20008 171.18915 Tm
+(T) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 162.98914 Tm
+(`) Tj
+1 0 0 1 46.059999 162.98914 Tm
+(\)) Tj
+1 0 0 1 50.08 162.98914 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 154.78919 Tm
+(a) Tj
+1 0 0 1 46.059999 154.78919 Tm
+(w) Tj
+1 0 0 1 50.08 154.78919 Tm
+(a) Tj
+1 0 0 1 54.1 154.78919 Tm
+(i) Tj
+1 0 0 1 58.120004 154.78919 Tm
+(t) Tj
+1 0 0 1 62.14 154.78919 Tm
+( ) Tj
+1 0 0 1 66.16 154.78919 Tm
+(p) Tj
+1 0 0 1 70.18 154.78919 Tm
+(o) Tj
+1 0 0 1 74.2 154.78919 Tm
+(o) Tj
+1 0 0 1 78.22 154.78919 Tm
+(l) Tj
+1 0 0 1 82.240009 154.78919 Tm
+(.) Tj
+1 0 0 1 86.26 154.78919 Tm
+(q) Tj
+1 0 0 1 90.28 154.78919 Tm
+(u) Tj
+1 0 0 1 94.3 154.78919 Tm
+(e) Tj
+1 0 0 1 98.32 154.78919 Tm
+(r) Tj
+1 0 0 1 102.34 154.78919 Tm
+(y) Tj
+1 0 0 1 106.35999 154.78919 Tm
+(\() Tj
+1 0 0 1 110.37999 154.78919 Tm
+(`) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 146.58917 Tm
+(A) Tj
+1 0 0 1 54.1 146.58917 Tm
+(L) Tj
+1 0 0 1 58.120004 146.58917 Tm
+(T) Tj
+1 0 0 1 62.14 146.58917 Tm
+(E) Tj
+1 0 0 1 66.16 146.58917 Tm
+(R) Tj
+1 0 0 1 70.18 146.58917 Tm
+( ) Tj
+1 0 0 1 74.2 146.58917 Tm
+(T) Tj
+1 0 0 1 78.22 146.58917 Tm
+(A) Tj
+1 0 0 1 82.240009 146.58917 Tm
+(B) Tj
+1 0 0 1 86.26 146.58917 Tm
+(L) Tj
+1 0 0 1 90.28 146.58917 Tm
+(E) Tj
+1 0 0 1 94.3 146.58917 Tm
+( ) Tj
+1 0 0 1 98.32 146.58917 Tm
+(u) Tj
+1 0 0 1 102.34 146.58917 Tm
+(s) Tj
+1 0 0 1 106.35999 146.58917 Tm
+(e) Tj
+1 0 0 1 110.37999 146.58917 Tm
+(r) Tj
+1 0 0 1 114.39999 146.58917 Tm
+(s) Tj
+1 0 0 1 118.41998 146.58917 Tm
+( ) Tj
+1 0 0 1 122.43998 146.58917 Tm
+(A) Tj
+1 0 0 1 126.45998 146.58917 Tm
+(D) Tj
+1 0 0 1 130.47998 146.58917 Tm
+(D) Tj
+1 0 0 1 134.49997 146.58917 Tm
+( ) Tj
+1 0 0 1 138.51996 146.58917 Tm
+(C) Tj
+1 0 0 1 142.53997 146.58917 Tm
+(O) Tj
+1 0 0 1 146.55997 146.58917 Tm
+(L) Tj
+1 0 0 1 150.57996 146.58917 Tm
+(U) Tj
+1 0 0 1 154.59995 146.58917 Tm
+(M) Tj
+1 0 0 1 158.61995 146.58917 Tm
+(N) Tj
+1 0 0 1 162.63996 146.58917 Tm
+( ) Tj
+1 0 0 1 166.65996 146.58917 Tm
+(I) Tj
+1 0 0 1 170.67996 146.58917 Tm
+(F) Tj
+1 0 0 1 174.69997 146.58917 Tm
+( ) Tj
+1 0 0 1 178.71997 146.58917 Tm
+(N) Tj
+1 0 0 1 182.73998 146.58917 Tm
+(O) Tj
+1 0 0 1 186.75998 146.58917 Tm
+(T) Tj
+1 0 0 1 190.77999 146.58917 Tm
+( ) Tj
+1 0 0 1 194.79999 146.58917 Tm
+(E) Tj
+1 0 0 1 198.81999 146.58917 Tm
+(X) Tj
+1 0 0 1 202.84 146.58917 Tm
+(I) Tj
+1 0 0 1 206.86 146.58917 Tm
+(S) Tj
+1 0 0 1 210.88 146.58917 Tm
+(T) Tj
+1 0 0 1 214.90001 146.58917 Tm
+(S) Tj
+1 0 0 1 218.92002 146.58917 Tm
+( ) Tj
+1 0 0 1 222.94002 146.58917 Tm
+(u) Tj
+1 0 0 1 226.96002 146.58917 Tm
+(s) Tj
+1 0 0 1 230.98003 146.58917 Tm
+(e) Tj
+1 0 0 1 235.00003 146.58917 Tm
+(r) Tj
+1 0 0 1 239.02004 146.58917 Tm
+(n) Tj
+1 0 0 1 243.04004 146.58917 Tm
+(a) Tj
+1 0 0 1 247.06005 146.58917 Tm
+(m) Tj
+1 0 0 1 251.08005 146.58917 Tm
+(e) Tj
+1 0 0 1 255.10005 146.58917 Tm
+( ) Tj
+1 0 0 1 259.12007 146.58917 Tm
+(T) Tj
+1 0 0 1 263.14009 146.58917 Tm
+(E) Tj
+1 0 0 1 267.16007 146.58917 Tm
+(X) Tj
+1 0 0 1 271.18006 146.58917 Tm
+(T) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 138.38916 Tm
+(`) Tj
+1 0 0 1 46.059999 138.38916 Tm
+(\)) Tj
+1 0 0 1 50.08 138.38916 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 130.18915 Tm
+(a) Tj
+1 0 0 1 46.059999 130.18915 Tm
+(w) Tj
+1 0 0 1 50.08 130.18915 Tm
+(a) Tj
+1 0 0 1 54.1 130.18915 Tm
+(i) Tj
+1 0 0 1 58.120004 130.18915 Tm
+(t) Tj
+1 0 0 1 62.14 130.18915 Tm
+( ) Tj
+1 0 0 1 66.16 130.18915 Tm
+(p) Tj
+1 0 0 1 70.18 130.18915 Tm
+(o) Tj
+1 0 0 1 74.2 130.18915 Tm
+(o) Tj
+1 0 0 1 78.22 130.18915 Tm
+(l) Tj
+1 0 0 1 82.240009 130.18915 Tm
+(.) Tj
+1 0 0 1 86.26 130.18915 Tm
+(q) Tj
+1 0 0 1 90.28 130.18915 Tm
+(u) Tj
+1 0 0 1 94.3 130.18915 Tm
+(e) Tj
+1 0 0 1 98.32 130.18915 Tm
+(r) Tj
+1 0 0 1 102.34 130.18915 Tm
+(y) Tj
+1 0 0 1 106.35999 130.18915 Tm
+(\() Tj
+1 0 0 1 110.37999 130.18915 Tm
+(`) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 121.989139 Tm
+(A) Tj
+1 0 0 1 54.1 121.989139 Tm
+(L) Tj
+1 0 0 1 58.120004 121.989139 Tm
+(T) Tj
+1 0 0 1 62.14 121.989139 Tm
+(E) Tj
+1 0 0 1 66.16 121.989139 Tm
+(R) Tj
+1 0 0 1 70.18 121.989139 Tm
+( ) Tj
+1 0 0 1 74.2 121.989139 Tm
+(T) Tj
+1 0 0 1 78.22 121.989139 Tm
+(A) Tj
+1 0 0 1 82.240009 121.989139 Tm
+(B) Tj
+1 0 0 1 86.26 121.989139 Tm
+(L) Tj
+1 0 0 1 90.28 121.989139 Tm
+(E) Tj
+1 0 0 1 94.3 121.989139 Tm
+( ) Tj
+1 0 0 1 98.32 121.989139 Tm
+(u) Tj
+1 0 0 1 102.34 121.989139 Tm
+(s) Tj
+1 0 0 1 106.35999 121.989139 Tm
+(e) Tj
+1 0 0 1 110.37999 121.989139 Tm
+(r) Tj
+1 0 0 1 114.39999 121.989139 Tm
+(s) Tj
+1 0 0 1 118.41998 121.989139 Tm
+( ) Tj
+1 0 0 1 122.43998 121.989139 Tm
+(A) Tj
+1 0 0 1 126.45998 121.989139 Tm
+(D) Tj
+1 0 0 1 130.47998 121.989139 Tm
+(D) Tj
+1 0 0 1 134.49997 121.989139 Tm
+( ) Tj
+1 0 0 1 138.51996 121.989139 Tm
+(C) Tj
+1 0 0 1 142.53997 121.989139 Tm
+(O) Tj
+1 0 0 1 146.55997 121.989139 Tm
+(L) Tj
+1 0 0 1 150.57996 121.989139 Tm
+(U) Tj
+1 0 0 1 154.59995 121.989139 Tm
+(M) Tj
+1 0 0 1 158.61995 121.989139 Tm
+(N) Tj
+1 0 0 1 162.63996 121.989139 Tm
+( ) Tj
+1 0 0 1 166.65996 121.989139 Tm
+(I) Tj
+1 0 0 1 170.67996 121.989139 Tm
+(F) Tj
+1 0 0 1 174.69997 121.989139 Tm
+( ) Tj
+1 0 0 1 178.71997 121.989139 Tm
+(N) Tj
+1 0 0 1 182.73998 121.989139 Tm
+(O) Tj
+1 0 0 1 186.75998 121.989139 Tm
+(T) Tj
+1 0 0 1 190.77999 121.989139 Tm
+( ) Tj
+1 0 0 1 194.79999 121.989139 Tm
+(E) Tj
+1 0 0 1 198.81999 121.989139 Tm
+(X) Tj
+1 0 0 1 202.84 121.989139 Tm
+(I) Tj
+1 0 0 1 206.86 121.989139 Tm
+(S) Tj
+1 0 0 1 210.88 121.989139 Tm
+(T) Tj
+1 0 0 1 214.90001 121.989139 Tm
+(S) Tj
+1 0 0 1 218.92002 121.989139 Tm
+( ) Tj
+1 0 0 1 222.94002 121.989139 Tm
+(c) Tj
+1 0 0 1 226.96002 121.989139 Tm
+(r) Tj
+1 0 0 1 230.98003 121.989139 Tm
+(e) Tj
+1 0 0 1 235.00003 121.989139 Tm
+(a) Tj
+1 0 0 1 239.02004 121.989139 Tm
+(t) Tj
+1 0 0 1 243.04004 121.989139 Tm
+(e) Tj
+1 0 0 1 247.06005 121.989139 Tm
+(d) Tj
+1 0 0 1 251.08005 121.989139 Tm
+(_) Tj
+1 0 0 1 255.10005 121.989139 Tm
+(a) Tj
+1 0 0 1 259.12007 121.989139 Tm
+(t) Tj
+1 0 0 1 263.14009 121.989139 Tm
+( ) Tj
+1 0 0 1 267.16007 121.989139 Tm
+(T) Tj
+1 0 0 1 271.18006 121.989139 Tm
+(I) Tj
+1 0 0 1 275.20008 121.989139 Tm
+(M) Tj
+1 0 0 1 279.2201 121.989139 Tm
+(E) Tj
+1 0 0 1 283.24009 121.989139 Tm
+(S) Tj
+1 0 0 1 287.26008 121.989139 Tm
+(T) Tj
+1 0 0 1 291.2801 121.989139 Tm
+(A) Tj
+1 0 0 1 295.30009 121.989139 Tm
+(M) Tj
+1 0 0 1 299.32008 121.989139 Tm
+(P) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 113.789188 Tm
+(D) Tj
+1 0 0 1 54.1 113.789188 Tm
+(E) Tj
+1 0 0 1 58.120004 113.789188 Tm
+(F) Tj
+1 0 0 1 62.14 113.789188 Tm
+(A) Tj
+1 0 0 1 66.16 113.789188 Tm
+(U) Tj
+1 0 0 1 70.18 113.789188 Tm
+(L) Tj
+1 0 0 1 74.2 113.789188 Tm
+(T) Tj
+1 0 0 1 78.22 113.789188 Tm
+( ) Tj
+1 0 0 1 82.240009 113.789188 Tm
+(C) Tj
+1 0 0 1 86.26 113.789188 Tm
+(U) Tj
+1 0 0 1 90.28 113.789188 Tm
+(R) Tj
+1 0 0 1 94.3 113.789188 Tm
+(R) Tj
+1 0 0 1 98.32 113.789188 Tm
+(E) Tj
+1 0 0 1 102.34 113.789188 Tm
+(N) Tj
+1 0 0 1 106.35999 113.789188 Tm
+(T) Tj
+1 0 0 1 110.37999 113.789188 Tm
+(_) Tj
+1 0 0 1 114.39999 113.789188 Tm
+(T) Tj
+1 0 0 1 118.41998 113.789188 Tm
+(I) Tj
+1 0 0 1 122.43998 113.789188 Tm
+(M) Tj
+1 0 0 1 126.45998 113.789188 Tm
+(E) Tj
+1 0 0 1 130.47998 113.789188 Tm
+(S) Tj
+1 0 0 1 134.49997 113.789188 Tm
+(T) Tj
+1 0 0 1 138.51996 113.789188 Tm
+(A) Tj
+1 0 0 1 142.53997 113.789188 Tm
+(M) Tj
+1 0 0 1 146.55997 113.789188 Tm
+(P) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 105.58917 Tm
+(`) Tj
+1 0 0 1 46.059999 105.58917 Tm
+(\)) Tj
+1 0 0 1 50.08 105.58917 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 89.18915 Tm
+(a) Tj
+1 0 0 1 46.059999 89.18915 Tm
+(w) Tj
+1 0 0 1 50.08 89.18915 Tm
+(a) Tj
+1 0 0 1 54.1 89.18915 Tm
+(i) Tj
+1 0 0 1 58.120004 89.18915 Tm
+(t) Tj
+1 0 0 1 62.14 89.18915 Tm
+( ) Tj
+1 0 0 1 66.16 89.18915 Tm
+(p) Tj
+1 0 0 1 70.18 89.18915 Tm
+(o) Tj
+1 0 0 1 74.2 89.18915 Tm
+(o) Tj
+1 0 0 1 78.22 89.18915 Tm
+(l) Tj
+1 0 0 1 82.240009 89.18915 Tm
+(.) Tj
+1 0 0 1 86.26 89.18915 Tm
+(q) Tj
+1 0 0 1 90.28 89.18915 Tm
+(u) Tj
+1 0 0 1 94.3 89.18915 Tm
+(e) Tj
+1 0 0 1 98.32 89.18915 Tm
+(r) Tj
+1 0 0 1 102.34 89.18915 Tm
+(y) Tj
+1 0 0 1 106.35999 89.18915 Tm
+(\() Tj
+1 0 0 1 110.37999 89.18915 Tm
+(`) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 80.9892 Tm
+(C) Tj
+1 0 0 1 54.1 80.9892 Tm
+(R) Tj
+1 0 0 1 58.120004 80.9892 Tm
+(E) Tj
+1 0 0 1 62.14 80.9892 Tm
+(A) Tj
+1 0 0 1 66.16 80.9892 Tm
+(T) Tj
+1 0 0 1 70.18 80.9892 Tm
+(E) Tj
+1 0 0 1 74.2 80.9892 Tm
+( ) Tj
+1 0 0 1 78.22 80.9892 Tm
+(T) Tj
+1 0 0 1 82.240009 80.9892 Tm
+(A) Tj
+1 0 0 1 86.26 80.9892 Tm
+(B) Tj
+1 0 0 1 90.28 80.9892 Tm
+(L) Tj
+1 0 0 1 94.3 80.9892 Tm
+(E) Tj
+1 0 0 1 98.32 80.9892 Tm
+( ) Tj
+1 0 0 1 102.34 80.9892 Tm
+(I) Tj
+1 0 0 1 106.35999 80.9892 Tm
+(F) Tj
+1 0 0 1 110.37999 80.9892 Tm
+( ) Tj
+1 0 0 1 114.39999 80.9892 Tm
+(N) Tj
+1 0 0 1 118.41998 80.9892 Tm
+(O) Tj
+1 0 0 1 122.43998 80.9892 Tm
+(T) Tj
+1 0 0 1 126.45998 80.9892 Tm
+( ) Tj
+1 0 0 1 130.47998 80.9892 Tm
+(E) Tj
+1 0 0 1 134.49997 80.9892 Tm
+(X) Tj
+1 0 0 1 138.51996 80.9892 Tm
+(I) Tj
+1 0 0 1 142.53997 80.9892 Tm
+(S) Tj
+1 0 0 1 146.55997 80.9892 Tm
+(T) Tj
+1 0 0 1 150.57996 80.9892 Tm
+(S) Tj
+1 0 0 1 154.59995 80.9892 Tm
+( ) Tj
+1 0 0 1 158.61995 80.9892 Tm
+(n) Tj
+1 0 0 1 162.63996 80.9892 Tm
+(e) Tj
+1 0 0 1 166.65996 80.9892 Tm
+(w) Tj
+1 0 0 1 170.67996 80.9892 Tm
+(s) Tj
+1 0 0 1 174.69997 80.9892 Tm
+( ) Tj
+1 0 0 1 178.71997 80.9892 Tm
+(\() Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 58.120004 72.789188 Tm
+(i) Tj
+1 0 0 1 62.14 72.789188 Tm
+(d) Tj
+1 0 0 1 66.16 72.789188 Tm
+( ) Tj
+1 0 0 1 70.18 72.789188 Tm
+(S) Tj
+1 0 0 1 74.2 72.789188 Tm
+(E) Tj
+1 0 0 1 78.22 72.789188 Tm
+(R) Tj
+1 0 0 1 82.240009 72.789188 Tm
+(I) Tj
+1 0 0 1 86.26 72.789188 Tm
+(A) Tj
+1 0 0 1 90.28 72.789188 Tm
+(L) Tj
+1 0 0 1 94.3 72.789188 Tm
+( ) Tj
+1 0 0 1 98.32 72.789188 Tm
+(P) Tj
+1 0 0 1 102.34 72.789188 Tm
+(R) Tj
+1 0 0 1 106.35999 72.789188 Tm
+(I) Tj
+1 0 0 1 110.37999 72.789188 Tm
+(M) Tj
+1 0 0 1 114.39999 72.789188 Tm
+(A) Tj
+1 0 0 1 118.41998 72.789188 Tm
+(R) Tj
+1 0 0 1 122.43998 72.789188 Tm
+(Y) Tj
+1 0 0 1 126.45998 72.789188 Tm
+( ) Tj
+1 0 0 1 130.47998 72.789188 Tm
+(K) Tj
+1 0 0 1 134.49997 72.789188 Tm
+(E) Tj
+1 0 0 1 138.51996 72.789188 Tm
+(Y) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 50.08 64.58917 Tm
+(\)) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 56.38916 Tm
+(`) Tj
+1 0 0 1 46.059999 56.38916 Tm
+(\)) Tj
+1 0 0 1 50.08 56.38916 Tm
+(;) Tj
+ET
+Q
+q
+BT
+/F3 6.7 Tf
+0 g
+0 G
+1 0 0 1 42.04 39.989198 Tm
+(a) Tj
+1 0 0 1 46.059999 39.989198 Tm
+(w) Tj
+1 0 0 1 50.08 39.989198 Tm
+(a) Tj
+1 0 0 1 54.1 39.989198 Tm
+(i) Tj
+1 0 0 1 58.120004 39.989198 Tm
+(t) Tj
+1 0 0 1 62.14 39.989198 Tm
+( ) Tj
+1 0 0 1 66.16 39.989198 Tm
+(p) Tj
+1 0 0 1 70.18 39.989198 Tm
+(o) Tj
+1 0 0 1 74.2 39.989198 Tm
+(o) Tj
+1 0 0 1 78.22 39.989198 Tm
+(l) Tj
+1 0 0 1 82.240009 39.989198 Tm
+(.) Tj
+1 0 0 1 86.26 39.989198 Tm
+(q) Tj
+1 0 0 1 90.28 39.989198 Tm
+(u) Tj
+1 0 0 1 94.3 39.989198 Tm
+(e) Tj
+1 0 0 1 98.32 39.989198 Tm
+(r) Tj
+1 0 0 1 102.34 39.989198 Tm
+(y) Tj
+1 0 0 1 106.35999 39.989198 Tm
+(\() Tj
+1 0 0 1 110.37999 39.989198 Tm
+(`) Tj
+ET
+Q
+
+endstream
+endobj
+
+18 0 obj
+<</Filter[/ASCII85Decode/FlateDecode]/Length 770>>
+stream
+Gb!#[gMY_1'R]XVS<k^%[=AR8[!c+c8Xu5Blm57L,\O@ujOUfAQW!gsCJ)Jj!K?;'!=9&eSsaX^H]Css,2_\Ve+Ng2"Nh`"e1-OdW3oM4L^oe#O,CM8T%Do5;6!lKC"25Zb(g"1PE>Z@#j)ODVb1M,jASKfWDE/GHEEtEnKn,oe4YdSs.WIekR/M?813$iJsn`TJB_Rhm5D?JqQS]VXTQ7#!IUf5`!#$+Nrd(@U^6#dOH0^a_l3?Ij"$[!=$RIS?KlILpgR3If_G+R2*23L$UelYK#PTIW5u51cD6t?;-B^G`?mn,_%p#iGL0/6cl*f,mLeb2e>BjB%U0-,"Ks@?DaFl-_A43.FhkqML3+7L=r/(Nn/^D)@7J69o<d2Y^F&Z_/YIQYpZRE:/1;=#E"gJ@mE\i.4f6-)J$O9[O-P\,K.6n(_9<uW%_'Mm>p3]WW:)U+\H1it.Asm+)q3:h[9cm:4XN:ZH(L;o!BFJgS=FLA.bcJ#M_D>tP:C3'F!G*f>`U2r3>NU^KeN1o,mTU#`TpK).pK8bc\8]]"caNqcZ1d3UPO]?jMVrindYP]n=EMQRbI+PjDl$NL%K.4LiOAJT::9#7Vc:X"V]_cFWD>I<,l;u8:2uD0M&fC54*lD:Ap?e2q7M+gcq@k!SrY@UBG)S<2addPar0C*(JU)Q\.b01l1=a$VVQUpL!MY)H%m>phnpu"Ha,>6U\OU1)=%O\QI]iH&cKClGnhGdFd9cH[E/H5$7"3jI"%RAiC&FIfR3Z]i+~>
+endstream
+endobj
+
+19 0 obj
+<</Filter[/ASCII85Decode/FlateDecode]/Length 1400>>
+stream
+Gb!Sk>Ar4d'Ro4HS=lrU.b;NE9A3?JM1B;:\J7fIX#N`VH[mQZORY;iPNKXKYqa7i,[5u:/Q%Vrq9F,sF$YLIr);WodfDG[U!ch)4T^$9C/q6bh>p>(g_A6@H!H'`'BS`>qi_pj'Rh!?3qKjKKV6nHE)JZSJUCch?#$D=UfLJpclH)8$oR,ldf3'&MU[t8rqNA2.C=H5p/)bq;esq(*?>X5#G?PKrTse94@/>U9gF-C4P0VDJ1h0uh^1aAhX5,'^"sd*kf.j,e9^s:4cuRRb[pc?'$k!FK?WA`EU[E.R(P3%9@'JmmELVg0g;\GWcAU)jPX`mRRE5dnL4_VL)r![/<h2s[YQ$:-HlPCN)BaA\YWf.Ehd0&46$;^14HMH(o=p2kLk*qW<g$2SDOAN[HX1pVes6fTH7[a4\&r3LQ&MrEYd;NO#Rj!Ep:-kIn7OjN;I)D7\ChfTNHSpbb7c%B@i%!bV;`CGW3&4$nI'EHqN:i\;S)BnW<3m$&CoKO?G]_8pNXB:[R"0)sS$GqQVase$VcdKN[Crg=Y/#l:d3D!+5#^Yr4qZIC0L\8,.Qb+o4?8oR!]8]:nE<9=SRU`e.l/f3kE=1-[^H?n/OeNR#&523k:b&iu5c'YJ^XcUM73E_D%*HI:KgY;5%&l++O>W@-'(9>?+nei>NYkC'GIr[4fq=&5Xo/MFJe:#+[X>[T.pF84m;(*YK<!Pk6R(ag(bZJQd\=A2;gYO)oQL0LZ&g/%'YaXY?2(lW>]EMkLR1>5^Pfq5gl&Nn9#Dg3QCRnUO*/7L--.pHU-B"[R/`:f]$0\UI`3+[?FEb="#'Hd)-[;@5[lrB$Y^qI>kesXHuYrRBI^gFm?g2-&\qn6d5DI(,G_+IkYE9\$Q)5Tt4JBZ`@,Q:Em3O@De-G3H8*>C=GCaDXB9(mHfGG:&_lq.N3=M0gp\2"PU-(%RK&QP8Xfl$Qj-5#AAa\"Sf\CBTKZY+]tbOiVr2q1VX[TJ7C:h8g\k.Q"ogcJX78q_td$=Rla;p)A.Mc-e6^@Fsi38<\]W^I<Hhp;1pcgA`k.HibS5M"dlHe9BFA21i2-1*Ms9";W7QF:?$cSh&Xn'C[-?b<@\-OI!`3Fkliq6E9B.^BkXS&d7j`9SG,K@e\R&$okS-Vo,J7<8S6Jf5+8Qe2_j\6Aq\2oNQ._sUfb,b<p/Ep$%IUb;24Y'c\XTcP4Us/9L1MqiQ)L;pN!6'qS&ESNiYYmc15rtpL`:j_!$r#b_'FLEMX-o72hoE#9P6F-,-I7OtB:-@>G-$a='JK8SJ5?S$K,nP%Ql=d\t]p2p5LAc#LPqO0VFeK8PjD<gn>i&O.=M<=>'aYoGM@$F+,)DPK2e9>UhCZ.l8E`g\gVt=6ZEs,s]$)KNSLO@"m;i:8rrW+D^MX~>
+endstream
+endobj
+
+20 0 obj
+<</Filter[/ASCII85Decode/FlateDecode]/Length 1225>>
+stream
+GauHK@;k-b&H0nXR&t[=fW/90U3;U2IK3!jC3OU.&F":gWgL^-+,LGe;i3((qi-fT-4[^fX1^)7,51X"ba[cM1n]l47e5u%!$);>Xr>Z3&'bk-:!s1-1\@3[ZI6gUVbK-6-hS"bSY+kuatL5]9r/2rf$(b&MH9!K;#(jeC@(01c^LX1:5JP?E(8+^rs/,OcrU8J7^\:7E;g()*LQk;N)*k]<@j"09pAmO,[eL@1Uss)JGQ2K:YQTj)M"t=fAPpaU=^YlO/gbn^d0_rEn.Na&D9H3[SAA9\d!Au(RfrA$QauNj04hj%Po#Bcnt=g18#he4r*.og,54"2PQS!PphZ19%ggS6lIn+k=ibsjE)6in"(,,TG8:BW1'k5RK^o:1q_umb4PsMgB*=);^Fe?Aq$>9>8\eDROos^jk?IX>l9-45,ueR*mFcc__b%TYuYJjYf?o;:%,'9[r3jS?n8a_RdGe+%Na/Vca:SWS4)1^:N/_CQ$Fq-r,bpB<Yf@>"'G*oFbDIB4K?f%Z2[$JEuD;TF8UjV9G:W$)%[cgjik`qo:Yigf6-#B213sSqW0fD2>QEXYMV^.6lQ#_RiXI=^t8QsY7I2=!2nS(XrYBa2)*gVP(`ANWnoO%C_tn<C.[HP=1l0477[?>iZoW/Mg-5cU]lNLGo["sg#g$dT;QL\TnH"-<!a(WdN9_1+G51o=N[CPB%j.;U[<lhRZY1M5;89n6mAK9XmNVtO#5B+YI/3L#dPUEPlkRbfSB;*[4:0pH8]eVQkgCL@ftOh.428Cp!Sf;)0asH("%mfU`L<=]@lB)e;OtQhR>%t7'33S)fVd"BBXH7PZ/r)S&6l]7afuT.iMI_qW?@CK@B]S\A%4b%'Ee>a,nZ1O@9cSRI,^V.=07A=c^MDc-_4P)l-!_O_Pd'3B=<3fR5@Y8Y`\4@2]O*#e3[TJmd7`NW@NTF'eMkYEfQ^[$s!d.<8UITtnB1C',\BIgqU^bYY,h$RtVO<8(=6.2SqB$$)(gp74hQ9Vt+431M\1N@YG@IYGe^Z8tnDV.JhO[8oBaJ+'>>kbd#4beDg6?-HngH5AorCc3XH2Sg.pLJQ*!fGj.Fq*NUo?4\^j0%_P[Sk,lo;0?R072]tUCFo^0Bb3t:4!.JCD(Ln(5V<KD4iIk<S0%Q.HT\=aQ*.N-WB*JJ8Y2sR19,5Sb0<k-?Uf0@V"4(UQ\MNUFBA7'Pqsfe8GQ;;b!1ZiMX:~>
+endstream
+endobj
+
+21 0 obj
+<</Filter[/ASCII85Decode/FlateDecode]/Length 1106>>
+stream
+GauHJD,8n?&H:NnE?HU)XE#4ma&^-S_MV:s*A:jL6s)1#gD\MM[2iR3qVPp5D3m6L(ebhrY3`cImd@XWMZZuPmj+Ym"P@k5hKQcg!4N2.%Fr6WKU,g\Q^k&;AdrKt[.4.5eiRG?H?7;%O7=BZOp&gmj&.a3jSb7YEoujqofDpLmSL`<_E5-$n_^)N%<"t`i80!r%f3N7R7,\oPXV0$'3G8.G8uHd_Af)sI+j#&HhufgfBc+!",k4@#LDu&K3*euO74qM"RoP>,Y4Ya*RG;aLoVj(oncA$:lhq+U4HD&c3:#'Bhnc5BO_4:a&S/g0pSCDdLc/U:L_0_4_o0^ZS6MNfnbAM*)O#2_4LdJ,%D\U=!r\=dKIQ>HB!a#Yo4?MiZafe1$9gFQeMn2:;]ta3_!+!IrO@O/kL)\]<_TLj>-u)bAOnI,Wd*-<.7p\cgo3dW(99IXkpd?/u(fr`>3,$Mh,N/J?pf]5srUYK8Rd!@Vr8C,A=k#ZH:.uW!TalB9Jb-QhS;s^15bK`n,29@iEe:kQ:oRO=3)V-9gh[/<t9#/JB>a!kgQcp(-e/7)_E8q.s,Cl2?AHOkU@8pZBkk`*o?L;+RFq*,HFC&ZS60VEQSu#qYnId<6sQ,K<(;65+7D_j)rpGKsBiY53.Q,d+_KLcCX9:b1Jf('mL(j'fFLM+U>;>9XlA[$O45,i]()R^_^TYbFHf=qYq^1nuZB$X]BYkH-P*c'hR^[12eGWir;6H3O#f:JY18\*LJ`>%_aEkdY#LANIRS"I&)8`MoVsReBXa)AWYZ`/_*KR@>ke><5e[7cCX*Z1i%rr=hs0Ko6=D`>O&=IQm3?2ERPb.p8Jt"&]7Yk4,POS?pY[6S`pEC^3UZK<r?"UD'jtq9U\,*daO,+'IYL/-h!;3""/LC8F#F:.qDnM03d;<NeN1o8gFMIJO$K*f!jiTi]PSI0.-sm8WNfc5A9?=SgNU+[N*W>((Z$FII+ET\3GL5_=QA6jVQqs/Z0_Va]Cmmu!XMC#NK$E;ORsr@It*AR>iI$kHIGOPVTCK2oSWZPQ?/:/a`Mh)2t)L$A\bP(/($DP?>gT:c[o06r*%[XKC4i\))jP^WX2UB:c~>
+endstream
+endobj
+
+22 0 obj
+<</Filter[/ASCII85Decode/FlateDecode]/Length 1152>>
+stream
+Gb"/%D0+\p&H9tYfON>33fJk.)Qq\c*T#5k8]"d"]65N3Lp.%[JgHLI!kI*9mn+&m)q4N/IOpG:[&\V^g3k"Q%d`6-YtmReBR3K8G/-*<DZih#<5CYMNgH6sSEHGu<B.(BrHCKWN\D[Oh$:ng;MA(c(4;d4k4\1329mA2Z\GY(<J^faM"$1=6tur+*B>hC`C^:PmBc6VHZ0prH`-A<=)^sHmR[_t>O]A9)sXX'X:Qr*:ho"50VfoV(\9HhAoe`%/k*J_1g15.qF+aEqB`*?$t%S@"7QnK2V&G;46X-3mG!<MeV]9iKcqZe6c&qYHW.,O4fcYQBd42`HqE8C#Ken@'ZHr5-)PJ6Q/cVjG2h2[<E*r5,L@Ro!a&!gLd.&M^[tIa(rc,PM+uaV7)^no8]4uN,-/ot>Jq3NaH_6B@5_K`J;uY.`!WHYfeT36.^4Zr'1%nC5(_C+4k#[ok@:*VJYS'sKu;QV?K'MQ7<e5?qO7ea1EOZ[?XPr4h((Stfc?,1Y,?<>ksFuK%'#8(m[2A`Yk^U8Bel>)<AW\ScMuhse0K++kkRm-^MYSXW&jgJTK<JF9+bmbCn[P?o*JP6d4llcPeaSm;P.C#'iWM-5&j$HJ/&@e`H3b6B2#;Q&KYD38MluWNCZhN6:*a#(DiqtM`&L4MJ\L[+VQ3BqSni7p@kCXG[Dc.A#ggc;TlqeTK#N=G##rcTIK0P/E'l\0.0dipJc,N1ON]hg6f?.jp@n4\c+0t]hCh.<+7d7-Yt;Y-EV<'ClKuU1X"Fn1:EB9?Rj%m9hJ\7)/MODq*IOB^m&8=*(dO81n?DPU(PRXRH;JYbC%3HZY:I4o4[<j#T*JN*jDSMN'Rod^6(:Vd&.\D"`BG*6Q"2g;Q*HIAf9@;P]n*/5*Ua-O)?q1oC.bJP5gkcf4p_bf1Oq_d<Bu[WK\'JNE7"OE''tgQ3TN#K:jB?j,;c^NK2rkPKlT%4c$H->aJBOQSH+TG$SKmZY_IeM38Bb.H>mef\^GdJ+K7Jc:(!bE=G6\Ile2-$Zl2^R8r55)T+cf@qsg_G<6T^rcl,aihFqo/Wa)="!472]h>addMpQ(T&EG*^XJC/_6YHnZ(BBF.A[HF)lK;h/m`PD.Dt!CN^Fdd*'`@@_GPZ:_10WMF--84edMJ"~>
+endstream
+endobj
+
+23 0 obj
+<</Filter[/ASCII85Decode/FlateDecode]/Length 1041>>
+stream
+Gb!#[@;jjR&H0nX\0=s]XUJo@l'Ri+$Z'L`F:`;iR]<m65e83n[TT;[s$"Ig8ePeBCS_%ufOmF@hn?W0)J%r6;r=GSE2#^sWe#<nH5Eq.b(3lSMB3_T[/%k^*$"*<p@q#S8FD;I]3qF-R=g29SI<Y\/?9Pl?;+gB5(*>XLG[?u$%E4N..?+:UB;#j"mXXp:P4*$qYS7M<G2d`#T'mDGTFS--k-r7UDA1Ec'R!!:=^:Xf,;_."*XJB@A2rO^t;2->`AVAr.$@"VALIGmd79A$6ce,3)e(Ul#PsA.$#tXS(]Qh8`$rCNjZ3@k!hVIjKeiCM+9O7oRU@\YE=_`10m._"IGK,,.-0TSL/\TB#1%NhlZ(nN:L\0*Q`=a"VV9M%n;F17[]Bn8RSqt>u#6gB%Bq/$ar^c)tcOF*u"iu#j8]fJmQ)qQsC(Z*nZkS3uCFh:tti#![:92!ffFiQN):MenQN6`N<H1UdQVrcYDWs).iJ='3^Ceg9U\7:/E@J<$7Ac%X'ohS.!/Q)'@)CXso&IK-4`%r"MtZeV-gnPcm$R1@4E5k$*F?DGS*A/u&o^3YH>.=S+2'SORp>@mkSS7;S_^lOe*VZ!8C]k1k8NnZ_L"&OY]`%.\f4V1=pL<@B>Xk#t'&N'mY?q2.lj^!/*L)ik4V.i1f1*$Z3#G`(^UfkE*\'$?A^<V;^\4<4oXV56hjj3PgCDcdQe]V74g\W[P@+aKLOG#,)sjPao\$9sMSQ$VOkO7W`oUX!FK`eZ']<d'gEZZ5-rjWWZF09p-<L%WIVigS4\$Q@91V$SN9d\H;+,!C/dYEukhMXHEYeM*(Zgn*_VM%/-/\6gTi:58&"ZMnjI,2/F#QmN'c<*1H!W"8rFihaQ6$i1WMg!euoB@]+B^XgpD_j-j;PV`-jjAdM&[K4`-/Fg3$1?I1q0qsma>a5b$<j/Lc(@8^MT\nd:(H.WddkI8,65e1;a51E(#]J)#J'RntpB^Bjo]F?Fq<(qpp/Pl#%9deE@)fZJmn<$@/BO4%lXu]sr-Rud#-gB?DEd(~>
+endstream
+endobj
+
+24 0 obj
+<</Filter[/ASCII85Decode/FlateDecode]/Length 1052>>
+stream
+Gau0BlYbE1'`QEWS49%P)fhXKQZZb@0561GV$k\X8s+uM9LtX4e8\Y/jk]*Q,S141/_q%mbd#K<Y2:sVW/7u)I@Dk)W=D!+Ff=b\5(n4a2*c)4Wg=c"p%[TS6cf#K_9p:JTi$,[c,e7A0'8Z4Xtdhj>',j/-%T&li=GVmd6?csJDYt]F;X!ZU"p9o$t'U^-uY).cS6n'X+5X0qYP46!'at_K?5KsOg-]"b"B%SF4$(XBY9JJ5K=c$@@ogC@-V2/;kt7q:Dl6Qn:8ndffWEX^H%cU^6p&8\^9sNLI3k@22hT"#)!:iqjHIE4ghD`l+h0(OD:`>$0>1F`94T3b_^H>6L/fFP%S-bGI;KlK@:bn)%g&)>Kl&2m@?hhg9"+CLYZ-'gg:@M'h8"+`.=<Mlm%9^MiXOaCdK^TOu5[jp&PM"l)XR%B''B:'N<1ulj!bOE:MD*0EC*A+"<?f\V0:+QnK\76b#\_,V3(!2fDHo/mI_o\+YYj(fYmIHp.]Y6p_^W&_7K*+fqJ`9h$@W4uAu5pC;&d65(b^.X64>jX/9F1)Jg?jW(+_@_K8Z,>Ca>74[YbKq5#Bf0o.)i^iRjHCqD'd\\3&2O_lQRs^;*\tO[qm2pY9mD_/RR%#=_1r>X#Ek)O(_fH)elkUIR.t)ZD<$;<00(F@+&XaN?n[42K,tY'FSn%Ym!JUpC@eh-D<D#usT$+HRB."ZZ"eHE++S8Y#LT7IKhM)oA@"1dC(^ALN[R\0sQuSlPPr4%Y/.ul"RjWDVW0AYH*flFSTcg(,^@#`^'pKVo?;]F1mDrK&F,k<5-TRd+Ae#X8@?7W?_LMfSg=-09mIi+'BeJ:TlN0X17@0edign*nW?#G&llqAWcA!>:LJUaXqD!BNT"+t-5%,/;j:A"f]'`s'oMI?0$h-cL1DSUJ5q36E%g9B.Xk0_jq3r_XgF'jiGOY2ln+Kpo,Y<f[!OZW(Up;`H9Q:c/M(NsQh`*nWMM[Kd:!mHCYBAO0dKP17l@e9k\Mmj_)3n4_]Y:O`SW*WsAd0DF8S:C?(4W!lQ_<si^/X]i~>
+endstream
+endobj
+
+25 0 obj
+<</Length 20164/F<</Subtype(application/c2pa)/Length 20164>>>>
+stream
+  Nƒjumb   jumdc2pa  Ä  ™ 8õqc2pa   Nûjumb   Gjumdc2ma  Ä  ™ 8õqurn:c2pa:a8740ea4-c1f2-43d6-886f-f7e0cfa40692   éjumb   )jumdc2as  Ä  ™ 8õqc2pa.assertions   	πjumb   #jumd@À2ªäHùß*÷ÙCic2pa.icon    bfdb image/svg+xml   	wbidb<svg width="716" height="716" viewBox="0 0 716 716" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M508.749 317.399C516.777 287.314 508.991 253.884 485.389 230.282C461.788 206.681 428.36 198.895 398.273 206.923C376.231 184.928 343.39 174.956 311.148 183.596C278.906 192.234 255.45 217.292 247.36 247.361C217.291 255.451 192.233 278.91 183.595 311.149C174.957 343.391 184.927 376.232 206.924 398.274C198.896 428.359 206.683 461.789 230.284 485.391C253.885 508.992 287.313 516.779 317.401 508.75C339.442 530.745 372.286 540.717 404.525 532.079C436.767 523.441 460.223 498.384 468.313 468.315C498.383 460.224 523.44 436.766 532.078 404.526C540.716 372.285 530.747 339.443 508.749 317.402V317.399ZM470.899 244.776C486.892 260.77 493.488 282.601 490.687 303.412L415.577 260.046C412.411 258.218 408.509 258.218 405.345 260.046L317.401 310.82V277.526C317.401 275.191 318.652 273.005 320.676 271.837L387.644 233.174C414.178 218.353 448.346 222.223 470.901 244.776H470.899ZM357.837 311.144L398.275 334.491V381.185L357.837 404.532L317.398 381.185V334.491L357.837 311.144ZM264.776 269.693C265.207 239.305 285.644 211.649 316.453 203.393C338.3 197.54 360.505 202.744 377.127 215.573L302.014 258.937C298.848 260.764 296.898 264.144 296.898 267.798V369.346L268.065 352.699C266.043 351.531 264.776 349.353 264.776 347.017V269.691V269.693ZM203.391 316.454C209.244 294.608 224.854 277.978 244.276 269.999V356.73C244.276 360.384 246.226 363.763 249.392 365.591L337.337 416.365L308.503 433.013C306.481 434.181 303.961 434.188 301.939 433.02L234.971 394.357C208.868 378.789 195.138 347.261 203.391 316.454ZM244.775 470.9C228.781 454.906 222.186 433.075 224.986 412.264L300.096 455.63C303.263 457.457 307.164 457.457 310.328 455.63L398.273 404.856V438.149C398.273 440.485 397.022 442.671 394.997 443.839L328.029 482.502C301.495 497.322 267.327 493.452 244.772 470.9H244.775ZM450.897 445.982C450.466 476.371 430.029 504.027 399.22 512.283C377.373 518.136 355.168 512.932 338.547 500.102L413.659 456.738C416.826 454.911 418.775 451.532 418.775 447.877V346.329L447.609 362.977C449.631 364.145 450.897 366.323 450.897 368.659V445.985V445.982ZM512.282 399.221C506.429 421.068 490.819 437.697 471.397 445.676V358.946C471.397 355.292 469.448 351.912 466.281 350.085L378.336 299.311L407.17 282.663C409.192 281.495 411.712 281.487 413.734 282.655L480.702 321.318C506.805 336.887 520.536 368.415 512.282 399.221Z" fill="black"/>
+</svg>
+   jumb   )jumdcbor  Ä  ™ 8õqc2pa.actions.v2    œcbor°gactionsÅ§factionlc2pa.createdqdigitalSourceTypexFhttp://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMediamsoftwareAgent¢dnameggpt-5-6gversionggpt-5-6dwhenx2026-08-24T01:59:31.757367Z   §jumb   (jumdcbor  Ä  ™ 8õqc2pa.hash.data    tcbor•jexclusionsÅ¢estart4UflengthNƒdnamenjumbf manifestcalgfsha256dhashX µ
+b\”îµŒ,bˆ-JòîùË∂„ˆ≥Õë…Wcpad@  âjumb   'jumdc2cl  Ä  ™ 8õqc2pa.claim.v2   Zcbor¶jinstanceIDx,xmp:iid:0e8a9461-9713-4227-a507-5009138a8949tclaim_generator_info£dnamegChatGPTdicon¢curlx$self#jumbf=c2pa.assertions/c2pa.icondhashX u>=W1í≥®NÎL˚¡åt∑'w÷–6«e6„ÒkspecVersione2.2.0isignaturexMself#jumbf=/c2pa/urn:c2pa:a8740ea4-c1f2-43d6-886f-f7e0cfa40692/c2pa.signaturercreated_assertionsÉ¢curlx$self#jumbf=c2pa.assertions/c2pa.icondhashX u>=W1í≥®NÎL˚¡åt∑'w÷–6«e6„Ò¢curlx*self#jumbf=c2pa.assertions/c2pa.actions.v2dhashX ≤U¥‡úi>q≈“†≠N&xFo,¨#”‰Ω˘RPóRÌ¢curlx)self#jumbf=c2pa.assertions/c2pa.hash.datadhashX ÍÅú„ó,ƒÜΩ¢ˆ·Äé”»d‰[º∞#æ
+‹}œ°hdc:titleiimage.pdfcalgfsha256  @8jumb   (jumdc2cs  Ä  ™ 8õqc2pa.signature   @cbor“ÑYË¢8$!ÇYà0ÇÑ0Çl†•¸ÈpåÚÄ1ÓDds0	*ÜHÜ˜ 0J1!0USSL.com C2PA ICA R1 202510U
+SSL Corporation10	UUS0260422155105Z270423155104Z0G10	UUS10U
+OpenAI OpCo, LLC10UOpenAI Media Service0Ç"0	*ÜHÜ˜ Ç 0Ç
+Ç ù∫jLMóÍÅâ∂—æ^XNr°ôﬂiq|Â!#”Å¢5úL£J<Ôn+øÊdÆ◊ÑKi$ZcœÍv
+ê≤e€|<ç·˛¡3wØ'ﬁ; :¥cáòÕMúø¥3D™T07F∏˝öyDsWU£c|›¨X/ÊzÆﬁ•ò√ìNHZ¯‡|§íK’l∫ ¬*»íæu‘îgµW™jöm00,◊Uaåj“S∂ x^ECûNí£ÄÒØ[—≤Î˛ãÔ∫◊7	ï´d-ô…áö¯ø.–ÁcÄñöy†7ì6£5…H…,òcÈDõ5¨πßSlúhs»
+9ÃIÛ £Çg0Çc0Uˇ0 0U#0Ä9=G‹óèØà{MsÕÂÓ§•*0o+c0a09+0Ü-http://crt-c2pa.ssl.com/SSL.com-C2PA-I-R1.cer0$+0Ühttp://ocsp-c2pa.ssl.com0U 00
++ÉË^0)U%"0 ++$
++ÉË^0UÛùM‘Àùr¯F
+vG•hOt0Uˇ¿0	+ÉË^
++ÉË^
+03	+ÉË^&$019bc403-5cd7-7669-afe6-fdb17177d4280	*ÜHÜ˜ Ç Ç8óle°7 Ò˘Ìt∫’¶[5ıglœ+fi@Õı¸“rVﬂ ï(Í¯fﬁBC=¯x†h(â≠µÓ¸ı2“å∏_ÁlÄnÎ[|ó[0Á.B∏∆pö˛˛ 	¨5F’†åIEÄ√∫íU«Zùo“Îÿyõñ:ºDê44}ÙA•3ó/.lQR
+m=I∞À«ÜXÃ‹Óû.È∆9∏3\ ⁄Ó W3T.p(J%)Oí|.“˙›g.zËPx9Q∫É:⁄à~ê#êíıbXöÂ¬®sÜû≈ÿqÈÔ\d{ëÓ7/vòxVdÁoB—}íºÖjomdÖÿˇ"ñÌπÔ≤–\Ñ}h]5[K±≈iHyÊhé†ƒaò:L¯¿$yÂ¶h‡Ô˝÷ê÷.-AduV_ìî∂°úä<∂¿ËmÛ≈CÁv,h§ÚÊÀãàïË{*r$Å=!∆cm/%Ä£ô[™)•˝GÍ·˜kÂ˚[P&m+°Ç]1ı›b®|2‹L«•,r0PÄWìÇ‚ËÆ≥ßØY4ÆrÔ*ùÆx¨‚3ÏSµ…ô“(®*7°N´¸Ã~Xõ'mE·¥*úΩ0W°1. .…‚»T€°íOæ$5ò˛/i‹∏M„ﬁ/Ëlı¡ä‚”˛rw”®+‘WóÆáÿ æì∂âYS0ÇO0Ç7†'+c»ÃM-õÑQrlÙú^2QÆﬁ0	*ÜHÜ˜ 0O1&0$USSL.com C2PA RSA Root CA 202510U
+SSL Corporation10	UUS0251222181730Z301221181730Z0J1!0USSL.com C2PA ICA R1 202510U
+SSL Corporation10	UUS0Ç"0	*ÜHÜ˜ Ç 0Ç
+Ç À:¥Õ∏úÀ)V∏yß¯kˆ˘ÿèr√¶ò≠*A⁄a.GRΩtQæ]ÏzÇ∂¿˚˙Ë'•ãË˛bÛ`Ò_H ssï‰NnÃNz5ﬁX·◊Ç‹“GCwõﬂHàyü£9§YN^‡NGóÚuB◊v=∂§"‹Ì∆o‘rFå÷Q«µ∑zÚì˘#'’ÄPuäp†hÈÁºÑ(|ú*Í)©¿/˛…vFU∞/cÍ}ûÙ∞D§@ﬁ@6\DäTkWHˇªo§’Íé¬◊|ÿºŒiø† MìE;ô.y“œûü)ªFŸxc0ñ3Qú^ìm˙Â4JXx≥)l]|∏uï<ôw!{ÿ¥JÎ⁄Õ«
+÷…¢ﬁÆó≥∂Qñ⁄íõ√≤ªPƒ˛∂§Lï]-íjObÂ‡*˜i†ú’πì ⁄—ª^O∆Ø˘)L–…ÏÎÛ≤qP{v'hë˘Pà∏w5ÿÕ°·◊”)ÁJ∆áTY$¬g≤m	5€∫Œ∏F•‡ã⁄·ßüjŒ`“ƒ˜¡ﬁsyU‡p¥ÔÍÃ«˛vâNf
+ià-Ì√F¢*‰å‘úWF-Xb’ ®˙~¯¬ŸajÀ5]†ì£≤e®/ÌÔòÁ¸~∫HÙ™°q¸ìØÍßNsài’B¿˘ÑíÖOÀT≥=:¯›)ey Cûñ∏áXñ!Ô—ë{ £Ç&0Ç"0Uˇ0ˇ 0Uˇ0)U%"0 ++$
++ÉË^0U9=G‹óèØà{MsÕÂÓ§•*0U 00
++ÉË^0U#0Ä¸*Ju:Ä˙ôcìsWÏæì∞}√{0x+l0j0$+0Ühttp://ocsp-c2pa.ssl.com0B+0Ü6http://crt-c2pa.ssl.com/SSL.com-C2PA-Root-2025-RSA.cer0	*ÜHÜ˜ Ç Œ6˙>Ôñ6-éØUfˇ{+ kVıÀ≠Ω*Å≠•¶–M£>ì‰ìi’‰å®nÊ7T‚%úÏef(<3=¢ö¢ªÕgdJÁæt!°n√´&ƒ;,⁄Uπ˝GN‡çxõ7Éƒt;≈GaÔmAr§€]CS…ñNÂ‡:ﬂ®›.—ØXó÷ÁÙ_r#<kœΩ9´åì®èßvY>·íı˜Ÿ˚Fb´nn‘àF†≥/*j_•N⁄¯‘¸ÃŸ£<©wE
+¡˘òπ9ÀÃ°q¿*Çq”‰ˆ%‚Q!m÷ﬂ‰SçoJ}é^¿∫’wy!ÅzŒÌ˜õé∂≤äBVùèkA*˛kúãÓ£(œ_ÛÈ–d÷Ó¬âKÎíœıØ¬'M∏ë°7%ôÊ˝Ä‹Ùº«7{æ¥-gX/Á√≥ãqÂDz0∂•≤u>[#~;”T¶:π«Ã3’j5zÅv/˛W⁄i¯>?ÔTèã{F√cû˙Ìƒ/pÑ+ˆVÇÙßÀ$◊l^${:Ω©X;i≥úè“ptˇãn&ª√´E«SñúGµ∆F´^ı¸àãh£5Â|jïeµ´Îπˇ∫∏‡õJG≤ŒÏ/â}ÓØúMƒ…Œı2=è˜&4˛"ãzÌ˘^^g_Q[€$V˚—Y°∑ﬁöf	∂—Ü.˙}~ïyõDf|6Öˆı°cpadY3                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       ˆY ç“Õu‰†L…Û¯ m ∞√C^[Ç?Ì´øŸ°µÙÆ⁄S‰~»å'	9gÂçuƒCyıãO¿§”†ìäà∂“(Ô—ƒu!4Ê√¨!*tòˇh≤RÂ]hf$‡#4·®Ä∫MoÏAòPªìµ£Ê±Œ1t‚˛Ôå˙∏¶ßOÃÊòs¥i6oˇ∞_$ñ
+¶Üÿ€iòë#GkdŒ¡®òÁjüÊ´œ-ﬁpÍ\™^g"§¥˙*1Å~)&\hˆﬂ^ÉÀ
+jr<:-bzÛ⁄^‰Î¯
+ôü‚ZO;WyH4°ëÅ˘ı~	0E!…ôkÜÀm(ÿ	`˝ ÌnZ‚£p÷iZ|
+endstream
+endobj
+
+26 0 obj
+<</AFRelationship/C2PA_Manifest/Desc(Content Credentials)/F(Content Credentials)/EF<</F 25 0 R>>/Subtype(application/c2pa)/Type/FileSpec/UF(Content Credentials)>>
+endobj
+
+xref
+0 27
+0000000015 65536 f 
+0000000018 00000 n 
+0000000075 00000 n 
+0000000172 00000 n 
+0000000274 00000 n 
+0000000369 00000 n 
+0000000444 00000 n 
+0000000621 00000 n 
+0000000798 00000 n 
+0000000975 00000 n 
+0000001152 00000 n 
+0000001330 00000 n 
+0000001508 00000 n 
+0000001686 00000 n 
+0000001864 00001 n 
+0000000000 00001 f 
+0000002003 00000 n 
+0000002102 00000 n 
+0000066254 00000 n 
+0000067110 00000 n 
+0000068597 00000 n 
+0000069909 00000 n 
+0000071102 00000 n 
+0000072341 00000 n 
+0000073469 00000 n 
+0000074608 00000 n 
+0000094870 00000 n 
+
+trailer
+<</Size 27/Root 14 1 R/ID[<1166168502DEF59E98EEA6E39A3F4B3C><D42EE0AF96409FACE0E2DE19916AE024>]>>
+startxref
+95050
+%%EOF
