@@ -2055,3 +2055,63 @@ Test qayta boshlash uchun
   }
 
 });
+// ===============================
+// 🚀 BOT VA SERVERNI ISHGA TUSHIRISH
+// ===============================
+
+async function startServer() {
+
+  try {
+
+    // Database
+    await initDatabase();
+
+    // Telegram bot
+    await bot.launch();
+
+    console.log("================================");
+    console.log("🤖 TELEGRAM BOT ISHLADI");
+    console.log("================================");
+
+    // Express server
+    app.listen(PORT, () => {
+
+      console.log("================================");
+      console.log(`🌐 SERVER PORT: ${PORT}`);
+      console.log("✅ SERVER ISHLADI");
+      console.log("================================");
+
+    });
+
+  } catch (error) {
+
+    console.error(
+      "❌ APPLICATION START XATOSI:",
+      error
+    );
+
+    process.exit(1);
+  }
+}
+
+
+// ===============================
+// START
+// ===============================
+
+startServer();
+
+
+// ===============================
+// BOT TO'XTAGANDA
+// ===============================
+
+process.once(
+  "SIGINT",
+  () => bot.stop("SIGINT")
+);
+
+process.once(
+  "SIGTERM",
+  () => bot.stop("SIGTERM")
+);
