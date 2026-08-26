@@ -2470,19 +2470,73 @@ async function startServer() {
 // START
 // ======================================================
 
-startServer()
-  .catch(
-    (error) => {
+async function startServer() {
+
+  console.log("🚀 Server ishga tushmoqda...");
+
+  // AVVAL PORTNI OCHAMIZ
+  app.listen(PORT, "0.0.0.0", () => {
+
+    console.log(
+      `✅ Server running on port ${PORT}`
+    );
+
+  });
+
+  // KEYIN DATABASE
+  await initDatabase();
+
+  // KEYIN BOT
+  if (BOT_TOKEN) {
+
+    try {
+
+      bot = createBot();
+
+      if (bot) {
+
+        await bot.telegram.deleteWebhook({
+          drop_pending_updates: false
+        });
+
+        await bot.launch({
+          dropPendingUpdates: false
+        });
+
+        console.log(
+          "✅ Telegram bot ishlayapti"
+        );
+
+      }
+
+    } catch (error) {
 
       console.error(
-        "❌ SERVER XATOSI:",
-        error
+        "❌ BOT XATOSI:",
+        error.message
       );
 
-      process.exit(1);
-
     }
+
+  } else {
+
+    console.error(
+      "❌ BOT_TOKEN mavjud emas"
+    );
+
+  }
+
+}
+
+
+startServer().catch((error) => {
+
+  console.error(
+    "❌ SERVER XATOSI:",
+    error
   );
+
+});
 
 
 // ======================================================
