@@ -5,9 +5,10 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-// ===============================
-// SOZLAMALAR
-// ===============================
+const app = express();
+
+app.use(express.json());
+app.use(express.static("public"));
 
 const PORT = process.env.PORT || 10000;
 
@@ -20,13 +21,23 @@ const ADMIN_ID =
 const DATABASE_URL =
   process.env.DATABASE_URL?.trim();
 
+const WEBHOOK_URL =
+  process.env.WEBHOOK_URL?.trim() ||
+  "https://proxy-tests.onrender.com";
+
 const PAYMENT_CARD =
   process.env.PAYMENT_CARD?.trim() ||
-  "Karta raqami sozlanmagan";
+  "Karta sozlanmagan";
 
-// ===============================
-// TEKSHIRUV
-// ===============================
+const WEBHOOK_PATH =
+  "/telegram/webhook";
+
+let bot = null;
+let pool = null;
+
+// ==========================================
+// LOG
+// ==========================================
 
 console.log("================================");
 console.log("🚀 PROXY TESTS BOT");
@@ -35,54 +46,61 @@ console.log("================================");
 console.log(
   BOT_TOKEN
     ? "✅ BOT_TOKEN topildi"
-    : "❌ BOT_TOKEN topilmadi"
-);
-
-console.log(
-  ADMIN_ID
-    ? "✅ ADMIN_ID topildi"
-    : "⚠️ ADMIN_ID topilmadi"
+    : "❌ BOT_TOKEN yo'q"
 );
 
 console.log(
   DATABASE_URL
     ? "✅ DATABASE_URL topildi"
-    : "❌ DATABASE_URL topilmadi"
+    : "❌ DATABASE_URL yo'q"
 );
 
-// ===============================
+console.log(
+  ADMIN_ID
+    ? "✅ ADMIN_ID topildi"
+    : "⚠️ ADMIN_ID yo'q"
+);
+
+console.log(
+  "🌐 WEBHOOK:",
+  WEBHOOK_URL
+);
+
+// ==========================================
 // EXPRESS
-// ===============================
-
-const app = express();
-
-app.use(express.json());
+// ==========================================
 
 app.get("/", (req, res) => {
-  res.status(200).send(
-    "✅ Proxy Tests Bot ishlayapti!"
+  res.send(
+    "✅ Proxy Tests Bot server ishlayapti!"
   );
 });
 
 app.get("/health", (req, res) => {
   res.json({
     server: "online",
-    telegram: BOT_TOKEN
+    bot: BOT_TOKEN
       ? "configured"
       : "missing",
     database: DATABASE_URL
       ? "configured"
-      : "missing"
+      : "missing",
+    miniapp: WEBHOOK_URL
   });
 });
 
-// ===============================
+// ==========================================
 // DATABASE
-// ===============================
+// ==========================================
 
-let pool = null;
+async function initDatabase() {
 
-if (DATABASE_URL) {
+  if (!DATABASE_URL) {
+    throw new Error(
+      "DATABASE_URL mavjud emas"
+    );
+  }
+
   pool = new Pool({
     connectionString: DATABASE_URL,
 
@@ -93,302 +111,339 @@ if (DATABASE_URL) {
 
   pool.on("error", (error) => {
     console.error(
-      "❌ PostgreSQL xatosi:",
+      "❌ PostgreSQL:",
       error.message
     );
   });
-}
 
-// ===============================
-// BOT
-// ===============================
-
-if (!BOT_TOKEN) {
-  console.error(
-    "❌ BOT_TOKEN mavjud emas!"
+  console.log(
+    "⏳ Database ulanmoqda..."
   );
 
-  process.exit(1);
+  await pool.query(
+    "SELECT NOW()"
+  );
+
+  console.log(
+    "✅ Database ulandi"
+  );
+
+  // ========================================
+  // USERS
+  // ========================================
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT,
+      full_name TEXT,
+      username TEXT,
+      created_at TIMESTAMP
+      DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+    users_telegram_id_unique
+    ON users (telegram_id)
+  `);
+
+  console.log(
+    "✅ Users jadvali tayyor"
+  );
+
+  // ========================================
+  // TESTS
+  // ========================================
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tests (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      start_time TIMESTAMP,
+      created_at TIMESTAMP
+      DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  console.log(
+    "✅ Tests jadvali tayyor"
+  );
+
+  // ========================================
+  // NEWS
+  // ========================================
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS news (
+      id SERIAL PRIMARY KEY,
+      title TEXT,
+      content TEXT,
+      test_date TEXT,
+      created_at TIMESTAMP
+      DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  console.log(
+    "✅ News jadvali tayyor"
+  );
+
+  // ========================================
+  // TICKETS
+  // ========================================
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tickets (
+      id SERIAL PRIMARY KEY,
+
+      ticket_number VARCHAR(6)
+      UNIQUE,
+
+      telegram_id BIGINT,
+
+      full_name TEXT,
+
+      test_name TEXT,
+
+      test_id INTEGER,
+
+      receipt_file_id TEXT,
+
+      payment_status VARCHAR(20)
+      DEFAULT 'pending',
+
+      approved_by BIGINT,
+
+      approved_at TIMESTAMP,
+
+      expires_at TIMESTAMP,
+
+      created_at TIMESTAMP
+      DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  console.log(
+    "✅ Tickets jadvali tayyor"
+  );
+
+  console.log(
+    "================================"
+  );
+
+  console.log(
+    "✅ DATABASE TAYYOR"
+  );
+
+  console.log(
+    "================================"
+  );
 }
 
-const bot = new Telegraf(BOT_TOKEN);
+// ==========================================
+// USER SAQLASH
+// ==========================================
 
-// ===============================
-// TEST HOLATI
-// ===============================
+async function saveUser(
+  telegramId,
+  fullName,
+  username
+) {
 
-const activeTests = new Map();
+  await pool.query(
+    `
+    INSERT INTO users
+    (
+      telegram_id,
+      full_name,
+      username
+    )
+    VALUES
+    ($1, $2, $3)
 
-console.log(
-  "✅ server.js yuklandi"
+    ON CONFLICT (telegram_id)
+
+    DO UPDATE SET
+      full_name =
+        EXCLUDED.full_name,
+
+      username =
+        EXCLUDED.username
+    `,
+    [
+      telegramId,
+      fullName,
+      username || null
+    ]
+  );
+}
+
+// ==========================================
+// BOTNI YARATISH
+// ==========================================
+
+function createBot() {
+
+  if (!BOT_TOKEN) {
+    throw new Error(
+      "BOT_TOKEN mavjud emas"
+    );
+  }
+
+  bot = new Telegraf(
+    BOT_TOKEN
+  );
+
+  console.log(
+    "🤖 Telegram bot yaratildi"
+  );
+}
+
+// ==========================================
+// WEBHOOK
+// ==========================================
+
+app.post(
+  WEBHOOK_PATH,
+  async (req, res) => {
+
+    try {
+
+      await bot.handleUpdate(
+        req.body
+      );
+
+      res.sendStatus(200);
+
+    } catch (error) {
+
+      console.error(
+        "❌ WEBHOOK XATOSI:",
+        error.message
+      );
+
+      res.sendStatus(500);
+    }
+  }
 );
-// ===============================
-// DATABASE NI TAYYORLASH
-// ===============================
 
-async function initDatabase() {
-  if (!pool) {
-    console.log("⚠️ DATABASE_URL mavjud emas");
-    return;
-  }
+// ==========================================
+// START SERVER
+// ==========================================
 
-  try {
-    console.log("⏳ Database ulanmoqda...");
-
-    await pool.query("SELECT NOW()");
-
-    console.log("✅ PostgreSQL ulandi");
-
-    // ============================
-    // USERS
-    // ============================
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        telegram_id BIGINT UNIQUE,
-        full_name TEXT,
-        username TEXT,
-        created_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // ============================
-    // NEWS
-    // ============================
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS news (
-        id SERIAL PRIMARY KEY,
-        title TEXT,
-        content TEXT,
-        test_date TEXT,
-        created_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // ============================
-    // TESTS
-    // ============================
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS tests (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        start_time TIMESTAMP,
-        created_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // ============================
-    // TICKETS
-    // ============================
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS tickets (
-        id SERIAL PRIMARY KEY,
-
-        ticket_number VARCHAR(6) UNIQUE,
-
-        telegram_id BIGINT,
-
-        full_name TEXT,
-
-        test_name TEXT,
-
-        test_id INTEGER,
-
-        receipt_file_id TEXT,
-
-        payment_status VARCHAR(20)
-        DEFAULT 'pending',
-
-        approved_by BIGINT,
-
-        approved_at TIMESTAMP,
-
-        expires_at TIMESTAMP,
-
-        created_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // ============================
-    // QUESTIONS
-    // ============================
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS questions (
-        id SERIAL PRIMARY KEY,
-
-        test_id INTEGER NOT NULL,
-
-        question TEXT NOT NULL,
-
-        option_a TEXT NOT NULL,
-
-        option_b TEXT NOT NULL,
-
-        option_c TEXT NOT NULL,
-
-        option_d TEXT NOT NULL,
-
-        correct_answer VARCHAR(1) NOT NULL,
-
-        created_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // ============================
-    // TEST NATIJALARI
-    // ============================
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS test_results (
-        id SERIAL PRIMARY KEY,
-
-        telegram_id BIGINT NOT NULL,
-
-        ticket_id INTEGER,
-
-        test_id INTEGER NOT NULL,
-
-        score INTEGER
-        DEFAULT 0,
-
-        total_questions INTEGER
-        DEFAULT 0,
-
-        started_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP,
-
-        finished_at TIMESTAMP
-      )
-    `);
-
-    console.log("================================");
-    console.log("✅ BARCHA JADVALLAR TAYYOR");
-    console.log("================================");
-
-  } catch (error) {
-
-    console.error(
-      "❌ DATABASE XATOSI:",
-      error.message
-    );
-  }
-}
-// ===============================
-// FOYDALANUVCHINI DATABASE'GA SAQLASH
-// ===============================
-
-async function saveUser(ctx) {
-
-  if (!pool) {
-    console.log("⚠️ Database ulanmagan");
-    return;
-  }
-
-  const telegramId = ctx.from.id;
-
-  const firstName =
-    ctx.from.first_name || "";
-
-  const lastName =
-    ctx.from.last_name || "";
-
-  const username =
-    ctx.from.username || null;
-
-  const fullName =
-    `${firstName} ${lastName}`.trim();
+async function start() {
 
   try {
 
-    await pool.query(
-      `
-      INSERT INTO users
-      (
-        telegram_id,
-        full_name,
-        username
-      )
-      VALUES
-      ($1, $2, $3)
+    await initDatabase();
 
-      ON CONFLICT (telegram_id)
+    createBot();
 
-      DO UPDATE SET
-        full_name = EXCLUDED.full_name,
-        username = EXCLUDED.username
-      `,
-      [
-        telegramId,
-        fullName,
-        username
-      ]
-    );
+    app.listen(
+      PORT,
+      "0.0.0.0",
+      async () => {
 
-    console.log(
-      `✅ User saqlandi: ${telegramId} | ${fullName}`
+        console.log(
+          `🚀 Server ${PORT} portda ishlayapti`
+        );
+
+        console.log(
+          `🌐 Mini App: ${WEBHOOK_URL}`
+        );
+
+        try {
+
+          await bot.telegram.setWebhook(
+            `${WEBHOOK_URL}${WEBHOOK_PATH}`
+          );
+
+          console.log(
+            "✅ Telegram webhook o'rnatildi"
+          );
+
+        } catch (error) {
+
+          console.error(
+            "❌ Webhook xatosi:",
+            error.message
+          );
+        }
+      }
     );
 
   } catch (error) {
 
     console.error(
-      "❌ USER SAQLASH XATOSI:",
+      "❌ SERVER XATOSI:",
       error.message
     );
+
+    process.exit(1);
   }
 }
 
+function createBot() {
 
-// ===============================
+  if (!BOT_TOKEN) {
+    throw new Error("BOT_TOKEN mavjud emas");
+  }
+
+  bot = new Telegraf(BOT_TOKEN);
+
+// ==========================================
 // /START
-// ===============================
+// ==========================================
 
 bot.start(async (ctx) => {
 
   try {
 
+    const telegramId =
+      ctx.from.id;
+
+    const firstName =
+      ctx.from.first_name || "";
+
+    const lastName =
+      ctx.from.last_name || "";
+
+    const username =
+      ctx.from.username || "";
+
+    const fullName =
+      `${firstName} ${lastName}`.trim();
+
     console.log(
-      `📩 /start: ${ctx.from.id}`
+      `📩 /start: ${telegramId} ${fullName}`
     );
 
-    // Foydalanuvchini saqlash
-    await saveUser(ctx);
-
-    const name =
-      ctx.from.first_name ||
-      "foydalanuvchi";
+    await saveUser(
+      telegramId,
+      fullName,
+      username
+    );
 
     await ctx.reply(
+      `Assalomu alaykum, ${
+        fullName || "foydalanuvchi"
+      }! 👋
 
-      `Assalomu alaykum, ${name}! 👋
-
-📝 *Proxy Tests* botiga xush kelibsiz!
+📝 Proxy Tests botiga xush kelibsiz!
 
 Kerakli bo'limni tanlang:`,
-
-      {
-        parse_mode: "Markdown",
-
-        ...Markup.keyboard([
-          [
-            "📰 Yangiliklar",
-            "🎫 Chipta"
-          ],
-          [
-            "📝 Testlar",
-            "🏆 Liga"
-          ]
-        ]).resize()
-      }
+      Markup.keyboard([
+        [
+          "📰 Yangiliklar",
+          "🎫 Chipta"
+        ],
+        [
+          "📝 Testlar",
+          "👤 Profil"
+        ]
+      ]).resize()
     );
 
   } catch (error) {
@@ -399,453 +454,351 @@ Kerakli bo'limni tanlang:`,
     );
 
     await ctx.reply(
-      "❌ Xatolik yuz berdi. Iltimos, qaytadan /start bosing."
-    );
-  }
-});
-// ===============================
-// YANGILIKLARNI KO'RISH
-// ===============================
-
-bot.hears("📰 Yangiliklar", async (ctx) => {
-
-  if (!pool) {
-    await ctx.reply(
-      "❌ Database ulanmagan."
-    );
-    return;
-  }
-
-  try {
-
-    const result = await pool.query(`
-      SELECT
-        id,
-        title,
-        content,
-        test_date,
-        created_at
-      FROM news
-      ORDER BY created_at DESC
-      LIMIT 20
-    `);
-
-    if (result.rows.length === 0) {
-
-      await ctx.reply(
-        `📰 YANGILIKLAR
-
-Hozircha yangiliklar mavjud emas.`
-      );
-
-      return;
-    }
-
-    let text =
-      "📰 YANGILIKLAR\n\n";
-
-    for (const news of result.rows) {
-
-      text +=
-        `📌 ${news.title || "Yangilik"}\n\n`;
-
-      text +=
-        `${news.content || ""}\n\n`;
-
-      if (news.test_date) {
-
-        text +=
-          `📅 Test sanasi: ${news.test_date}\n\n`;
-      }
-
-      text +=
-        "━━━━━━━━━━━━━━\n\n";
-    }
-
-    await ctx.reply(text);
-
-  } catch (error) {
-
-    console.error(
-      "❌ YANGILIKLAR XATOSI:",
-      error.message
-    );
-
-    await ctx.reply(
-      "❌ Yangiliklarni olishda xatolik."
+      "❌ Xatolik yuz berdi."
     );
   }
 });
 
 
-// ===============================
-// ADMIN — YANGILIK QO'SHISH
-// ===============================
-
-bot.command("addnews", async (ctx) => {
-
-  // Admin tekshirish
-
-  if (
-    ADMIN_ID &&
-    String(ctx.from.id) !==
-    String(ADMIN_ID)
-  ) {
-
-    await ctx.reply(
-      "❌ Siz admin emassiz."
-    );
-
-    return;
-  }
-
-  const text =
-    ctx.message.text
-      .replace("/addnews", "")
-      .trim();
-
-  /*
-    FORMAT:
-
-    /addnews Sarlavha | Matn | Sana
-  */
-
-  const parts =
-    text
-      .split("|")
-      .map(x => x.trim());
-
-  if (parts.length < 2) {
-
-    await ctx.reply(
-      `❌ Format noto'g'ri.
-
-To'g'ri format:
-
-/addnews Sarlavha | Yangilik matni | Sana
-
-Masalan:
-
-/addnews Yangi test | 10-sentabr kuni test bo'ladi | 10.09.2026`
-    );
-
-    return;
-  }
-
-  const title =
-    parts[0];
-
-  const content =
-    parts[1];
-
-  const testDate =
-    parts[2] || null;
-
-  try {
-
-    await pool.query(
-      `
-      INSERT INTO news
-      (
-        title,
-        content,
-        test_date
-      )
-      VALUES
-      ($1, $2, $3)
-      `,
-      [
-        title,
-        content,
-        testDate
-      ]
-    );
-
-    await ctx.reply(
-      `✅ YANGILIK SAQLANDI!
-
-📌 Sarlavha:
-${title}
-
-📝 Matn:
-${content}
-
-${
-  testDate
-    ? `📅 Sana: ${testDate}`
-    : ""
-}`
-    );
-
-  } catch (error) {
-
-    console.error(
-      "❌ YANGILIK SAQLASH XATOSI:",
-      error.message
-    );
-
-    await ctx.reply(
-      `❌ Yangilikni saqlashda xatolik.
-
-Xato:
-${error.message}`
-    );
-  }
-});
-
-
-// ===============================
-// ADMIN — YANGILIKLARNI O'CHIRISH
-// ===============================
-
-bot.command("deletenews", async (ctx) => {
-
-  if (
-    ADMIN_ID &&
-    String(ctx.from.id) !==
-    String(ADMIN_ID)
-  ) {
-
-    await ctx.reply(
-      "❌ Siz admin emassiz."
-    );
-
-    return;
-  }
-
-  const id =
-    ctx.message.text
-      .replace("/deletenews", "")
-      .trim();
-
-  if (!id) {
-
-    await ctx.reply(
-      "❌ Yangilik ID sini yozing.\n\nMasalan:\n/deletenews 5"
-    );
-
-    return;
-  }
-
-  try {
-
-    const result =
-      await pool.query(
-        `
-        DELETE FROM news
-        WHERE id = $1
-        RETURNING id, title
-        `,
-        [id]
-      );
-
-    if (result.rows.length === 0) {
-
-      await ctx.reply(
-        "❌ Bunday yangilik topilmadi."
-      );
-
-      return;
-    }
-
-    await ctx.reply(
-      `🗑 Yangilik o'chirildi!
-
-🆔 ID: ${result.rows[0].id}
-📌 ${result.rows[0].title}`
-    );
-
-  } catch (error) {
-
-    console.error(
-      "❌ NEWS DELETE XATOSI:",
-      error.message
-    );
-
-    await ctx.reply(
-      "❌ Yangilikni o'chirishda xatolik."
-    );
-  }
-});
-
-
-// ===============================
-// ADMIN — YANGILIKLAR RO'YXATI
-// ===============================
-
-bot.command("newslist", async (ctx) => {
-
-  if (
-    ADMIN_ID &&
-    String(ctx.from.id) !==
-    String(ADMIN_ID)
-  ) {
-
-    await ctx.reply(
-      "❌ Siz admin emassiz."
-    );
-
-    return;
-  }
-
-  try {
-
-    const result =
-      await pool.query(`
-        SELECT
-          id,
-          title,
-          test_date
-        FROM news
-        ORDER BY created_at DESC
-      `);
-
-    if (result.rows.length === 0) {
-
-      await ctx.reply(
-        "📰 Yangiliklar mavjud emas."
-      );
-
-      return;
-    }
-
-    let text =
-      "📰 YANGILIKLAR RO'YXATI\n\n";
-
-    for (const news of result.rows) {
-
-      text +=
-        `🆔 ${news.id}\n`;
-
-      text +=
-        `📌 ${news.title}\n`;
-
-      if (news.test_date) {
-
-        text +=
-          `📅 ${news.test_date}\n`;
-      }
-
-      text +=
-        "\n";
-    }
-
-    await ctx.reply(text);
-
-  } catch (error) {
-
-    console.error(
-      "❌ NEWS LIST XATOSI:",
-      error.message
-    );
-
-    await ctx.reply(
-      "❌ Yangiliklarni olishda xatolik."
-    );
-  }
-});
-// ===============================
-// 🎫 CHIPTA — TESTLAR RO'YXATI
-// ===============================
-
-bot.hears("🎫 Chipta", async (ctx) => {
-
-  if (!pool) {
-    await ctx.reply("❌ Database ulanmagan.");
-    return;
-  }
-
-  try {
-
-    const result = await pool.query(`
-      SELECT
-        id,
-        name,
-        start_time
-      FROM tests
-      ORDER BY id ASC
-    `);
-
-    if (result.rows.length === 0) {
-
-      await ctx.reply(
-        `🎫 CHIPTA
-
-Hozircha testlar mavjud emas.`
-      );
-
-      return;
-    }
-
-    const buttons = result.rows.map((test) => {
-
-      return [
-        Markup.button.callback(
-          `📝 ${test.name}`,
-          `ticket_test:${test.id}`
-        )
-      ];
-
-    });
-
-    await ctx.reply(
-      `🎫 CHIPTA OLISH
-
-Qaysi test uchun chipta olmoqchisiz?`,
-      Markup.inlineKeyboard(buttons)
-    );
-
-  } catch (error) {
-
-    console.error(
-      "❌ CHIPTA XATOSI:",
-      error.message
-    );
-
-    await ctx.reply(
-      "❌ Testlarni olishda xatolik."
-    );
-  }
-});
-
-
-// ===============================
-// 🎫 TEST TANLASH
-// ===============================
-
-bot.action(
-  /^ticket_test:(\d+)$/,
+// ==========================================
+// YANGILIKLAR
+// ==========================================
+
+bot.hears(
+  "📰 Yangiliklar",
   async (ctx) => {
 
-    if (!pool) {
-      await ctx.answerCbQuery(
-        "Database ulanmagan."
+    try {
+
+      const result =
+        await pool.query(`
+          SELECT
+            id,
+            title,
+            content,
+            test_date
+          FROM news
+          ORDER BY created_at DESC
+          LIMIT 20
+        `);
+
+      if (
+        result.rows.length === 0
+      ) {
+
+        await ctx.reply(
+          "📰 Hozircha yangiliklar mavjud emas."
+        );
+
+        return;
+      }
+
+      let text =
+        "📰 YANGILIKLAR\n\n";
+
+      for (
+        const news
+        of result.rows
+      ) {
+
+        text +=
+          `📌 ${news.title || "Yangilik"}\n`;
+
+        text +=
+          `${news.content || ""}\n`;
+
+        if (news.test_date) {
+
+          text +=
+            `📅 ${news.test_date}\n`;
+        }
+
+        text += "\n";
+      }
+
+      await ctx.reply(text);
+
+    } catch (error) {
+
+      console.error(
+        "❌ YANGILIKLAR XATOSI:",
+        error.message
       );
+
+      await ctx.reply(
+        "❌ Yangiliklarni olishda xatolik."
+      );
+    }
+  }
+);
+
+
+// ==========================================
+// TESTLAR
+// ==========================================
+
+bot.hears(
+  "📝 Testlar",
+  async (ctx) => {
+
+    try {
+
+      const result =
+        await pool.query(`
+          SELECT
+            id,
+            name,
+            start_time
+          FROM tests
+          ORDER BY id ASC
+        `);
+
+      if (
+        result.rows.length === 0
+      ) {
+
+        await ctx.reply(
+          "📝 Hozircha testlar mavjud emas."
+        );
+
+        return;
+      }
+
+      let text =
+        "📝 TESTLAR\n\n";
+
+      for (
+        const test
+        of result.rows
+      ) {
+
+        text +=
+          `🔹 ${test.name}\n`;
+
+        if (test.start_time) {
+
+          text +=
+            `⏰ ${test.start_time}\n`;
+        }
+
+        text += "\n";
+      }
+
+      await ctx.reply(text);
+
+    } catch (error) {
+
+      console.error(
+        "❌ TESTLAR XATOSI:",
+        error.message
+      );
+
+      await ctx.reply(
+        "❌ Testlarni olishda xatolik."
+      );
+    }
+  }
+);
+
+
+// ==========================================
+// PROFIL
+// ==========================================
+
+bot.hears(
+  "👤 Profil",
+  async (ctx) => {
+
+    try {
+
+      const result =
+        await pool.query(
+          `
+          SELECT
+            telegram_id,
+            full_name,
+            username,
+            created_at
+          FROM users
+          WHERE telegram_id = $1
+          LIMIT 1
+          `,
+          [ctx.from.id]
+        );
+
+      if (
+        result.rows.length === 0
+      ) {
+
+        await ctx.reply(
+          "❌ Profil topilmadi."
+        );
+
+        return;
+      }
+
+      const user =
+        result.rows[0];
+
+      await ctx.reply(
+        `👤 PROFIL
+
+🆔 Telegram ID:
+${user.telegram_id}
+
+👨‍💻 F.I.SH:
+${user.full_name || "—"}
+
+🔹 Username:
+${
+  user.username
+    ? "@" + user.username
+    : "Mavjud emas"
+}
+
+📅 Ro'yxatdan o'tgan:
+${user.created_at}`
+      );
+
+    } catch (error) {
+
+      console.error(
+        "❌ PROFIL XATOSI:",
+        error.message
+      );
+
+      await ctx.reply(
+        "❌ Profilni olishda xatolik."
+      );
+    }
+  }
+);
+
+
+// ==========================================
+// NOMA'LUM XABAR
+// ==========================================
+
+bot.on(
+  "text",
+  async (ctx) => {
+
+    const text =
+      ctx.message.text;
+
+    if (
+      text === "📰 Yangiliklar" ||
+      text === "🎫 Chipta" ||
+      text === "📝 Testlar" ||
+      text === "👤 Profil"
+    ) {
       return;
     }
+
+    await ctx.reply(
+      "👇 Menyudan kerakli bo'limni tanlang."
+    );
+  }
+);
+
+
+console.log(
+  "🤖 Bot komandalar va menyu tayyor"
+);
+// ==========================================
+// 🎫 CHIPTA
+// ==========================================
+
+bot.hears(
+  "🎫 Chipta",
+  async (ctx) => {
+
+    try {
+
+      const result = await pool.query(`
+        SELECT
+          id,
+          name
+        FROM tests
+        ORDER BY id ASC
+      `);
+
+      if (result.rows.length === 0) {
+
+        await ctx.reply(
+          "🎫 Hozircha testlar mavjud emas."
+        );
+
+        return;
+      }
+
+      const buttons =
+        result.rows.map((test) => [
+
+          Markup.button.callback(
+            `📝 ${test.name}`,
+            `ticket:${test.id}`
+          )
+
+        ]);
+
+      await ctx.reply(
+        `🎫 CHIPTA OLISH
+
+Qaysi test uchun chipta olmoqchisiz?`,
+
+        Markup.inlineKeyboard(
+          buttons
+        )
+      );
+
+    } catch (error) {
+
+      console.error(
+        "❌ CHIPTA XATOSI:",
+        error.message
+      );
+
+      await ctx.reply(
+        "❌ Testlarni olishda xatolik."
+      );
+    }
+  }
+);
+
+
+// ==========================================
+// TESTNI TANLASH
+// ==========================================
+
+bot.action(
+  /^ticket:(\d+)$/,
+  async (ctx) => {
 
     try {
 
       const testId =
         Number(ctx.match[1]);
 
-      const result = await pool.query(
-        `
-        SELECT
-          id,
-          name,
-          start_time
-        FROM tests
-        WHERE id = $1
-        LIMIT 1
-        `,
-        [testId]
-      );
+      const result =
+        await pool.query(
+          `
+          SELECT
+            id,
+            name
+          FROM tests
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [testId]
+        );
 
-      if (result.rows.length === 0) {
+      if (
+        result.rows.length === 0
+      ) {
 
         await ctx.answerCbQuery(
-          "Test topilmadi."
+          "❌ Test topilmadi."
         );
 
         return;
@@ -854,21 +807,16 @@ bot.action(
       const test =
         result.rows[0];
 
-      await ctx.answerCbQuery();
-
-      // Eski pending ticketni tekshirish
-
+      // Oldingi pending buyurtmani tekshirish
       const pending =
         await pool.query(
           `
-          SELECT
-            id
+          SELECT id
           FROM tickets
           WHERE telegram_id = $1
           AND test_id = $2
           AND payment_status = 'pending'
           AND receipt_file_id IS NULL
-          ORDER BY created_at DESC
           LIMIT 1
           `,
           [
@@ -877,27 +825,26 @@ bot.action(
           ]
         );
 
-      if (pending.rows.length > 0) {
+      if (
+        pending.rows.length > 0
+      ) {
+
+        await ctx.answerCbQuery(
+          "Sizda kutayotgan buyurtma bor."
+        );
 
         await ctx.reply(
-          `⏳ Siz "${test.name}" uchun chipta buyurtmasini allaqachon boshlagansiz.
+          `⏳ Siz "${test.name}" uchun
+allaqachon buyurtma yaratgansiz.
 
-🆔 Buyurtma ID:
-${pending.rows[0].id}
-
-💳 To'lovni amalga oshirib, chek rasmini yuboring.`
+💳 To'lovni amalga oshiring va
+chek rasmini yuboring.`
         );
 
         return;
       }
 
-      // Ticket yaratish
-
-      const fullName =
-        `${ctx.from.first_name || ""} ${
-          ctx.from.last_name || ""
-        }`.trim();
-
+      // Yangi ticket
       const ticket =
         await pool.query(
           `
@@ -914,15 +861,24 @@ ${pending.rows[0].id}
           RETURNING id
           `,
           [
+
             ctx.from.id,
-            fullName,
+
+            `${ctx.from.first_name || ""} ${
+              ctx.from.last_name || ""
+            }`.trim(),
+
             test.name,
+
             testId
+
           ]
         );
 
       const ticketId =
         ticket.rows[0].id;
+
+      await ctx.answerCbQuery();
 
       await ctx.reply(
         `🎫 CHIPTA BUYURTMASI
@@ -937,12 +893,12 @@ ${ticketId}
 
 ${PAYMENT_CARD}
 
-💰 To'lovni amalga oshiring.
+💰 To'lovni amalga oshirgandan
+so'ng, chek rasmini shu chatga yuboring.
 
-📸 Keyin to'lov chekini
-shu chatga RASM ko'rinishida yuboring.
+⚠️ Chek aniq va to'liq ko'rinsin.
 
-⚠️ Chek aniq va o'qiladigan bo'lsin.`
+⏳ Chek yuborilgach admin tekshiradi.`
       );
 
     } catch (error) {
@@ -953,114 +909,107 @@ shu chatga RASM ko'rinishida yuboring.
       );
 
       await ctx.answerCbQuery(
-        "Xatolik yuz berdi."
-      );
-
-      await ctx.reply(
-        "❌ Chipta buyurtmasini yaratishda xatolik."
+        "❌ Xatolik yuz berdi."
       );
     }
   }
 );
 
 
-// ===============================
+// ==========================================
 // 📸 CHEK QABUL QILISH
-// ===============================
+// ==========================================
 
-bot.on("photo", async (ctx) => {
+bot.on(
+  "photo",
+  async (ctx) => {
 
-  if (!pool) {
-    await ctx.reply(
-      "❌ Database ulanmagan."
-    );
-    return;
-  }
+    try {
 
-  try {
+      const result =
+        await pool.query(
+          `
+          SELECT
+            id,
+            test_name
+          FROM tickets
+          WHERE telegram_id = $1
+          AND payment_status = 'pending'
+          AND receipt_file_id IS NULL
+          ORDER BY created_at DESC
+          LIMIT 1
+          `,
+          [ctx.from.id]
+        );
 
-    const result =
+      if (
+        result.rows.length === 0
+      ) {
+
+        await ctx.reply(
+          `❗ Sizda chek kutayotgan
+chipta buyurtmasi yo'q.`
+        );
+
+        return;
+      }
+
+      const ticket =
+        result.rows[0];
+
+      const photos =
+        ctx.message.photo;
+
+      const largestPhoto =
+        photos[
+          photos.length - 1
+        ];
+
+      const fileId =
+        largestPhoto.file_id;
+
       await pool.query(
         `
-        SELECT
-          id,
-          telegram_id,
-          full_name,
-          test_name,
-          test_id
-        FROM tickets
-        WHERE telegram_id = $1
-        AND payment_status = 'pending'
-        AND receipt_file_id IS NULL
-        ORDER BY created_at DESC
-        LIMIT 1
+        UPDATE tickets
+        SET receipt_file_id = $1
+        WHERE id = $2
         `,
-        [ctx.from.id]
+        [
+          fileId,
+          ticket.id
+        ]
       );
-
-    if (result.rows.length === 0) {
 
       await ctx.reply(
-        `❌ Sizda chek kutayotgan chipta buyurtmasi yo'q.
-
-Avval 🎫 Chipta bo'limidan test tanlang.`
-      );
-
-      return;
-    }
-
-    const ticket =
-      result.rows[0];
-
-    const photos =
-      ctx.message.photo;
-
-    const largestPhoto =
-      photos[photos.length - 1];
-
-    const fileId =
-      largestPhoto.file_id;
-
-    await pool.query(
-      `
-      UPDATE tickets
-      SET receipt_file_id = $1
-      WHERE id = $2
-      `,
-      [
-        fileId,
-        ticket.id
-      ]
-    );
-
-    await ctx.reply(
-      `✅ CHEK QABUL QILINDI!
-
-📝 Test:
-${ticket.test_name}
+        `✅ CHEK QABUL QILINDI
 
 🆔 Buyurtma:
 ${ticket.id}
 
-⏳ Admin to'lovni tekshiradi.
+📝 Test:
+${ticket.test_name}
 
-Tasdiqlangandan so'ng
-6 xonali chipta raqami yuboriladi.`
-    );
+⏳ Admin chekni tekshiradi.
+
+Tasdiqlangandan keyin
+6 xonali chipta beriladi.`
+      );
 
 
-    // =========================
-    // ADMINGA YUBORISH
-    // =========================
+      // ======================================
+      // ADMINGA YUBORISH
+      // ======================================
 
-    if (ADMIN_ID) {
+      if (ADMIN_ID) {
 
-      await bot.telegram.sendPhoto(
-        ADMIN_ID,
-        fileId,
-        {
-          caption:
-`💳 YANGI TO'LOV
+        await bot.telegram.sendPhoto(
+          ADMIN_ID,
+
+          fileId,
+
+          {
+            caption:
+              `💳 YANGI TO'LOV
 
 🆔 Buyurtma ID:
 ${ticket.id}
@@ -1068,120 +1017,87 @@ ${ticket.id}
 📝 Test:
 ${ticket.test_name}
 
-👤 F.I.SH:
-${ticket.full_name || "Noma'lum"}
-
 👤 Telegram ID:
-${ticket.telegram_id}
+${ctx.from.id}
 
-👇 To'lovni tekshiring.`,
+👤 F.I.SH:
+${(
+  `${ctx.from.first_name || ""} ${
+    ctx.from.last_name || ""
+  }`
+).trim()}
 
-          reply_markup: {
-            inline_keyboard: [
+👇 Chekni tekshiring.`,
 
-              [
-                {
-                  text: "✅ TASDIQLASH",
-                  callback_data:
-                    `approve_ticket:${ticket.id}`
-                }
-              ],
+            reply_markup: {
 
-              [
-                {
-                  text: "❌ RAD ETISH",
-                  callback_data:
-                    `reject_ticket:${ticket.id}`
-                }
+              inline_keyboard: [
+
+                [
+                  {
+                    text:
+                      "✅ TASDIQLASH",
+
+                    callback_data:
+                      `approve:${ticket.id}`
+                  }
+                ],
+
+                [
+                  {
+                    text:
+                      "❌ RAD ETISH",
+
+                    callback_data:
+                      `reject:${ticket.id}`
+                  }
+                ]
+
               ]
-
-            ]
+            }
           }
-        }
+        );
+
+      }
+
+    } catch (error) {
+
+      console.error(
+        "❌ CHEK XATOSI:",
+        error.message
       );
 
-    }
-
-  } catch (error) {
-
-    console.error(
-      "❌ CHEK XATOSI:",
-      error.message
-    );
-
-    await ctx.reply(
-      "❌ Chekni qabul qilishda xatolik."
-    );
-  }
-});
-
-
-// ===============================
-// 🔢 6 XONALI CHIPTA GENERATORI
-// ===============================
-
-async function generateTicketNumber() {
-
-  while (true) {
-
-    const number =
-      Math.floor(
-        100000 +
-        Math.random() * 900000
-      ).toString();
-
-    const result =
-      await pool.query(
-        `
-        SELECT id
-        FROM tickets
-        WHERE ticket_number = $1
-        LIMIT 1
-        `,
-        [number]
+      await ctx.reply(
+        "❌ Chekni qabul qilishda xatolik."
       );
-
-    if (result.rows.length === 0) {
-
-      return number;
     }
   }
-}
+);
 
 
-// ===============================
-// ✅ ADMIN — TASDIQLASH
-// ===============================
+// ==========================================
+// ✅ ADMIN TASDIQLASH
+// ==========================================
 
 bot.action(
-  /^approve_ticket:(\d+)$/,
+  /^approve:(\d+)$/,
   async (ctx) => {
 
-    if (!pool) {
-
-      await ctx.answerCbQuery(
-        "Database ulanmagan."
-      );
-
-      return;
-    }
-
-    // Admin tekshirish
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.answerCbQuery(
-        "❌ Siz admin emassiz."
-      );
-
-      return;
-    }
-
     try {
+
+      // Adminni tekshirish
+      if (
+        ADMIN_ID &&
+        String(ctx.from.id) !==
+        String(ADMIN_ID)
+      ) {
+
+        await ctx.answerCbQuery(
+          "❌ Siz admin emassiz."
+        );
+
+        return;
+      }
 
       const ticketId =
         Number(ctx.match[1]);
@@ -1197,7 +1113,9 @@ bot.action(
           [ticketId]
         );
 
-      if (result.rows.length === 0) {
+      if (
+        result.rows.length === 0
+      ) {
 
         await ctx.answerCbQuery(
           "❌ Buyurtma topilmadi."
@@ -1215,7 +1133,7 @@ bot.action(
       ) {
 
         await ctx.answerCbQuery(
-          "Bu to'lov allaqachon tasdiqlangan."
+          "Bu buyurtma allaqachon tasdiqlangan."
         );
 
         return;
@@ -1233,25 +1151,44 @@ bot.action(
         return;
       }
 
-      if (
-        !ticket.receipt_file_id
-      ) {
 
-        await ctx.answerCbQuery(
-          "Chek mavjud emas."
-        );
+      // ====================================
+      // 6 XONALI CHIPTA
+      // ====================================
 
-        return;
+      let ticketNumber;
+
+      while (true) {
+
+        ticketNumber =
+          Math.floor(
+            100000 +
+            Math.random() * 900000
+          ).toString();
+
+        const check =
+          await pool.query(
+            `
+            SELECT id
+            FROM tickets
+            WHERE ticket_number = $1
+            LIMIT 1
+            `,
+            [ticketNumber]
+          );
+
+        if (
+          check.rows.length === 0
+        ) {
+
+          break;
+        }
       }
 
-      // =========================
-      // CHIPTA RAQAMI
-      // =========================
 
-      const ticketNumber =
-        await generateTicketNumber();
-
-      // 24 soat
+      // ====================================
+      // 24 SOATLIK MUDDAT
+      // ====================================
 
       const expiresAt =
         new Date(
@@ -1259,39 +1196,52 @@ bot.action(
           24 * 60 * 60 * 1000
         );
 
-      // =========================
+
+      // ====================================
       // DATABASE UPDATE
-      // =========================
+      // ====================================
 
       await pool.query(
         `
         UPDATE tickets
+
         SET
           ticket_number = $1,
-          payment_status = 'approved',
+
+          payment_status =
+            'approved',
+
           approved_by = $2,
-          approved_at = CURRENT_TIMESTAMP,
+
+          approved_at =
+            CURRENT_TIMESTAMP,
+
           expires_at = $3
+
         WHERE id = $4
         `,
         [
           ticketNumber,
+
           ctx.from.id,
+
           expiresAt,
+
           ticketId
         ]
       );
 
-      // =========================
+
+      // ====================================
       // FOYDALANUVCHIGA CHIPTA
-      // =========================
+      // ====================================
 
       await bot.telegram.sendMessage(
         ticket.telegram_id,
 
-`🎉 TO'LOV TASDIQLANDI!
+        `🎉 TO'LOV TASDIQLANDI!
 
-🎫 SIZNING CHIPTANGIZ:
+🎫 SIZNING CHİPTANGIZ:
 
 🔢 ${ticketNumber}
 
@@ -1301,23 +1251,21 @@ ${ticket.test_name}
 ⏰ Amal qilish muddati:
 24 soat
 
-📅 Tugash vaqti:
-${expiresAt.toLocaleString("uz-UZ")}
-
 📝 Testlar bo'limiga kirib,
-chipta raqamingizni kiriting.
-
-Omad! 🍀`
+ushbu chipta raqamini kiriting.`
       );
+
 
       await ctx.answerCbQuery(
         "✅ To'lov tasdiqlandi!"
       );
 
+
+      // Admin xabarini o'zgartirish
       try {
 
         await ctx.editMessageCaption(
-`✅ TO'LOV TASDIQLANDI
+          `✅ TO'LOV TASDIQLANDI
 
 🆔 Buyurtma:
 ${ticketId}
@@ -1325,14 +1273,16 @@ ${ticketId}
 📝 Test:
 ${ticket.test_name}
 
-🎫 Chipta:
+🔢 Chipta:
 ${ticketNumber}
 
 👤 Telegram ID:
 ${ticket.telegram_id}`
         );
 
-      } catch {}
+      } catch {
+        // Xabar o'zgarmasa ham bot ishlashda davom etadi
+      }
 
     } catch (error) {
 
@@ -1349,37 +1299,28 @@ ${ticket.telegram_id}`
 );
 
 
-// ===============================
-// ❌ ADMIN — RAD ETISH
-// ===============================
+// ==========================================
+// ❌ ADMIN RAD ETISH
+// ==========================================
 
 bot.action(
-  /^reject_ticket:(\d+)$/,
+  /^reject:(\d+)$/,
   async (ctx) => {
 
-    if (!pool) {
-
-      await ctx.answerCbQuery(
-        "Database ulanmagan."
-      );
-
-      return;
-    }
-
-    if (
-      ADMIN_ID &&
-      String(ctx.from.id) !==
-      String(ADMIN_ID)
-    ) {
-
-      await ctx.answerCbQuery(
-        "❌ Siz admin emassiz."
-      );
-
-      return;
-    }
-
     try {
+
+      if (
+        ADMIN_ID &&
+        String(ctx.from.id) !==
+        String(ADMIN_ID)
+      ) {
+
+        await ctx.answerCbQuery(
+          "❌ Siz admin emassiz."
+        );
+
+        return;
+      }
 
       const ticketId =
         Number(ctx.match[1]);
@@ -1387,7 +1328,9 @@ bot.action(
       const result =
         await pool.query(
           `
-          SELECT *
+          SELECT
+            telegram_id,
+            test_name
           FROM tickets
           WHERE id = $1
           LIMIT 1
@@ -1395,10 +1338,12 @@ bot.action(
           [ticketId]
         );
 
-      if (result.rows.length === 0) {
+      if (
+        result.rows.length === 0
+      ) {
 
         await ctx.answerCbQuery(
-          "Buyurtma topilmadi."
+          "❌ Buyurtma topilmadi."
         );
 
         return;
@@ -1410,50 +1355,43 @@ bot.action(
       await pool.query(
         `
         UPDATE tickets
-        SET
-          payment_status = 'rejected',
-          approved_by = $1,
-          approved_at = CURRENT_TIMESTAMP
-        WHERE id = $2
+        SET payment_status = 'rejected'
+        WHERE id = $1
         `,
-        [
-          ctx.from.id,
-          ticketId
-        ]
+        [ticketId]
       );
 
+
+      // Foydalanuvchiga xabar
       await bot.telegram.sendMessage(
         ticket.telegram_id,
 
-`❌ TO'LOV RAD ETILDI
-
-🆔 Buyurtma:
-${ticketId}
+        `❌ TO'LOV RAD ETILDI
 
 📝 Test:
 ${ticket.test_name}
 
-Iltimos, to'lov ma'lumotlarini tekshirib,
-qaytadan chipta olishga urinib ko'ring.`
+⚠️ Chekni qayta tekshiring
+va kerak bo'lsa yangi to'lov
+chekini yuboring.`
       );
 
+
       await ctx.answerCbQuery(
-        "❌ To'lov rad etildi."
+        "❌ Buyurtma rad etildi."
       );
+
 
       try {
 
         await ctx.editMessageCaption(
-`❌ TO'LOV RAD ETILDI
+          `❌ TO'LOV RAD ETILDI
 
 🆔 Buyurtma:
 ${ticketId}
 
 📝 Test:
-${ticket.test_name}
-
-👤 Telegram ID:
-${ticket.telegram_id}`
+${ticket.test_name}`
         );
 
       } catch {}
@@ -1466,598 +1404,300 @@ ${ticket.telegram_id}`
       );
 
       await ctx.answerCbQuery(
-        "❌ Rad etishda xatolik."
+        "❌ Xatolik yuz berdi."
       );
     }
   }
 );
-// ===============================
-// 📝 TESTLAR BO'LIMI
-// ===============================
+bot.action(
+  /^reject:(\d+)$/,
+  async (ctx) => {
 
-const testSessions = new Map();
+    // ...
 
-
-// ===============================
-// 📝 TESTLAR TUGMASI
-// ===============================
-
-bot.hears("📝 Testlar", async (ctx) => {
-
-  await ctx.reply(
-`📝 TESTLAR
-
-🎫 Testni boshlash uchun sizga berilgan
-6 xonali chipta raqamini yuboring.
-
-Masalan:
-
-123456`
-  );
-
-});
-
-
-// ===============================
-// 🔢 CHIPTA RAQAMINI QABUL QILISH
-// ===============================
-
-bot.on("text", async (ctx, next) => {
-
-  const text =
-    ctx.message.text.trim();
-
-  // Menyu tugmalari bo'lsa o'tkazib yuboramiz
-
-  if (
-    text === "📰 Yangiliklar" ||
-    text === "🎫 Chipta" ||
-    text === "📝 Testlar" ||
-    text === "🏆 Liga"
-  ) {
-
-    return next();
   }
+);
 
-  // Faqat 6 xonali raqamni tekshiramiz
+}
+// ==========================================
+// MINI APP API
+// ==========================================
 
-  if (!/^\d{6}$/.test(text)) {
-
-    return next();
-  }
-
-  if (!pool) {
-
-    await ctx.reply(
-      "❌ Database ulanmagan."
-    );
-
-    return;
-  }
+// Testlar
+app.get("/api/tests", async (req, res) => {
 
   try {
 
-    // =========================
-    // CHIPTANI TOPISH
-    // =========================
+    const result = await pool.query(`
+      SELECT
+        id,
+        name,
+        start_time,
+        created_at
+      FROM tests
+      ORDER BY id ASC
+    `);
+
+    res.json({
+      success: true,
+      tests: result.rows
+    });
+
+  } catch (error) {
+
+    console.error(
+      "❌ API TESTS XATOSI:",
+      error.message
+    );
+
+    res.status(500).json({
+      success: false,
+      message: "Testlarni olishda xatolik"
+    });
+  }
+});
+
+
+// ==========================================
+// MINI APP — YANGILIKLAR
+// ==========================================
+
+app.get("/api/news", async (req, res) => {
+
+  try {
+
+    const result = await pool.query(`
+      SELECT
+        id,
+        title,
+        content,
+        test_date,
+        created_at
+      FROM news
+      ORDER BY created_at DESC
+      LIMIT 20
+    `);
+
+    res.json({
+      success: true,
+      news: result.rows
+    });
+
+  } catch (error) {
+
+    console.error(
+      "❌ API NEWS XATOSI:",
+      error.message
+    );
+
+    res.status(500).json({
+      success: false,
+      message: "Yangiliklarni olishda xatolik"
+    });
+  }
+});
+
+
+// ==========================================
+// MINI APP — USER PROFIL
+// ==========================================
+
+app.get("/api/user/:telegramId", async (req, res) => {
+
+  try {
+
+    const telegramId =
+      req.params.telegramId;
 
     const result =
       await pool.query(
         `
         SELECT
-          *
-        FROM tickets
-        WHERE ticket_number = $1
-        AND telegram_id = $2
-        AND payment_status = 'approved'
+          telegram_id,
+          full_name,
+          username,
+          created_at
+        FROM users
+        WHERE telegram_id = $1
         LIMIT 1
         `,
-        [
-          text,
-          ctx.from.id
-        ]
+        [telegramId]
       );
-
-    if (result.rows.length === 0) {
-
-      await ctx.reply(
-`❌ CHIPTA TOPILMADI.
-
-Tekshiring:
-
-• Chipta raqami to'g'rimi?
-• Ushbu chipta sizga tegishlimi?
-• To'lov tasdiqlanganmi?`
-      );
-
-      return;
-    }
-
-    const ticket =
-      result.rows[0];
-
-    // =========================
-    // MUDDATNI TEKSHIRISH
-    // =========================
 
     if (
-      ticket.expires_at &&
-      new Date(ticket.expires_at) <
-      new Date()
+      result.rows.length === 0
     ) {
 
-      await ctx.reply(
-`⛔ CHIPTA MUDDATI TUGAGAN.
-
-🎫 Chipta:
-${ticket.ticket_number}
-
-📝 Test:
-${ticket.test_name}
-
-Yangi chipta olishingiz kerak.`
-      );
-
-      return;
+      return res.status(404).json({
+        success: false,
+        message: "Foydalanuvchi topilmadi"
+      });
     }
 
-
-    // =========================
-    // SAVOLLARNI OLISH
-    // =========================
-
-    const questions =
-      await pool.query(
-        `
-        SELECT
-          id,
-          question,
-          option_a,
-          option_b,
-          option_c,
-          option_d,
-          correct_answer
-        FROM questions
-        WHERE test_id = $1
-        ORDER BY id ASC
-        `,
-        [ticket.test_id]
-      );
-
-    if (questions.rows.length === 0) {
-
-      await ctx.reply(
-`❌ Ushbu test uchun savollar hali qo'shilmagan.
-
-📝 Test:
-${ticket.test_name}`
-      );
-
-      return;
-    }
-
-
-    // =========================
-    // TEST SESSION
-    // =========================
-
-    testSessions.set(
-      ctx.from.id,
-      {
-        ticketId: ticket.id,
-
-        testId: ticket.test_id,
-
-        testName: ticket.test_name,
-
-        questions:
-          questions.rows,
-
-        currentQuestion: 0,
-
-        score: 0,
-
-        answers: [],
-
-        startedAt: new Date()
-      }
-    );
-
-
-    await ctx.reply(
-`✅ CHIPTA TASDIQLANDI!
-
-🎫 ${ticket.ticket_number}
-
-📝 Test:
-${ticket.test_name}
-
-📊 Savollar:
-${questions.rows.length} ta
-
-⏳ Test boshlanmoqda...`
-    );
-
-
-    // Birinchi savol
-
-    await sendQuestion(ctx);
+    res.json({
+      success: true,
+      user: result.rows[0]
+    });
 
   } catch (error) {
 
     console.error(
-      "❌ CHIPTA TEKSHIRISH XATOSI:",
+      "❌ API USER XATOSI:",
       error.message
     );
 
-    await ctx.reply(
-      "❌ Testni boshlashda xatolik."
-    );
+    res.status(500).json({
+      success: false,
+      message: "Profilni olishda xatolik"
+    });
   }
-
 });
 
 
-// ===============================
-// ❓ SAVOL YUBORISH
-// ===============================
+// ==========================================
+// MINI APP — TICKETLAR
+// ==========================================
 
-async function sendQuestion(ctx) {
-
-  const session =
-    testSessions.get(ctx.from.id);
-
-  if (!session) {
-    return;
-  }
-
-  const index =
-    session.currentQuestion;
-
-  const questions =
-    session.questions;
-
-  // =========================
-  // TEST TUGAGAN
-  // =========================
-
-  if (
-    index >= questions.length
-  ) {
-
-    await finishTest(ctx);
-
-    return;
-  }
-
-  const question =
-    questions[index];
-
-
-  // =========================
-  // SAVOL MATNI
-  // =========================
-
-  const questionText =
-
-`📝 SAVOL ${index + 1}/${questions.length}
-
-${question.question}
-
-A) ${question.option_a}
-
-B) ${question.option_b}
-
-C) ${question.option_c}
-
-D) ${question.option_d}`;
-
-
-  // =========================
-  // JAVOB TUGMALARI
-  // =========================
-
-  await ctx.reply(
-
-    questionText,
-
-    Markup.inlineKeyboard([
-
-      [
-        Markup.button.callback(
-          "🅰️ A",
-          `answer:A`
-        ),
-
-        Markup.button.callback(
-          "🅱️ B",
-          `answer:B`
-        )
-      ],
-
-      [
-        Markup.button.callback(
-          "©️ C",
-          `answer:C`
-        ),
-
-        Markup.button.callback(
-          "🅳 D",
-          `answer:D`
-        )
-      ]
-
-    ])
-
-  );
-
-}
-
-
-// ===============================
-// 🅰️🅱️🅲️🅳 JAVOBNI QABUL QILISH
-// ===============================
-
-bot.action(
-  /^answer:(A|B|C|D)$/,
-  async (ctx) => {
+app.get(
+  "/api/tickets/:telegramId",
+  async (req, res) => {
 
     try {
 
-      const userId =
-        ctx.from.id;
+      const telegramId =
+        req.params.telegramId;
 
-      const session =
-        testSessions.get(userId);
-
-      if (!session) {
-
-        await ctx.answerCbQuery(
-          "❌ Faol test mavjud emas."
+      const result =
+        await pool.query(
+          `
+          SELECT
+            id,
+            ticket_number,
+            test_name,
+            payment_status,
+            expires_at,
+            created_at
+          FROM tickets
+          WHERE telegram_id = $1
+          ORDER BY created_at DESC
+          LIMIT 20
+          `,
+          [telegramId]
         );
 
-        return;
-      }
-
-      const index =
-        session.currentQuestion;
-
-      const question =
-        session.questions[index];
-
-      if (!question) {
-
-        await ctx.answerCbQuery();
-        return;
-      }
-
-      const answer =
-        ctx.match[1];
-
-      // =========================
-      // JAVOBNI SAQLASH
-      // =========================
-
-      const correct =
-        answer ===
-        question.correct_answer
-          .toUpperCase();
-
-
-      if (correct) {
-
-        session.score++;
-
-      }
-
-
-      session.answers.push({
-
-        questionId:
-          question.id,
-
-        answer,
-
-        correct
-
+      res.json({
+        success: true,
+        tickets: result.rows
       });
-
-
-      await ctx.answerCbQuery(
-
-        correct
-          ? "✅ To'g'ri!"
-          : "❌ Noto'g'ri!"
-
-      );
-
-
-      // =========================
-      // KEYINGI SAVOL
-      // =========================
-
-      session.currentQuestion++;
-
-      await sendQuestion(ctx);
 
     } catch (error) {
 
       console.error(
-        "❌ JAVOB XATOSI:",
+        "❌ API TICKETS XATOSI:",
         error.message
       );
 
-      await ctx.answerCbQuery(
-        "❌ Xatolik."
-      );
+      res.status(500).json({
+        success: false,
+        message: "Chiptalarni olishda xatolik"
+      });
     }
-
   }
 );
 
 
-// ===============================
-// 🏁 TESTNI YAKUNLASH
-// ===============================
+// ==========================================
+// MINI APP — TEST TEKSHIRISH
+// ==========================================
 
-async function finishTest(ctx) {
+app.get(
+  "/api/ticket/:ticketNumber",
+  async (req, res) => {
 
-  const userId =
-    ctx.from.id;
+    try {
 
-  const session =
-    testSessions.get(userId);
+      const ticketNumber =
+        req.params.ticketNumber;
 
-  if (!session) {
-    return;
-  }
+      const result =
+        await pool.query(
+          `
+          SELECT
+            ticket_number,
+            full_name,
+            test_name,
+            payment_status,
+            expires_at,
+            created_at
+          FROM tickets
+          WHERE ticket_number = $1
+          LIMIT 1
+          `,
+          [ticketNumber]
+        );
 
-  try {
+      if (
+        result.rows.length === 0
+      ) {
 
-    const total =
-      session.questions.length;
+        return res.status(404).json({
+          success: false,
+          message: "Chipta topilmadi"
+        });
+      }
 
-    const score =
-      session.score;
+      const ticket =
+        result.rows[0];
 
-    const percentage =
-      Math.round(
-        (score / total) * 100
+      let valid = false;
+
+      if (
+        ticket.payment_status ===
+        "approved"
+      ) {
+
+        if (
+          !ticket.expires_at ||
+          new Date(ticket.expires_at) >
+          new Date()
+        ) {
+
+          valid = true;
+        }
+      }
+
+      res.json({
+        success: true,
+        valid,
+        ticket
+      });
+
+    } catch (error) {
+
+      console.error(
+        "❌ API TICKET XATOSI:",
+        error.message
       );
 
-
-    // =========================
-    // DATABASE
-    // =========================
-
-    if (pool) {
-
-      await pool.query(
-        `
-        INSERT INTO test_results
-        (
-          telegram_id,
-          ticket_id,
-          test_id,
-          score,
-          total_questions,
-          started_at,
-          finished_at
-        )
-        VALUES
-        (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          CURRENT_TIMESTAMP
-        )
-        `,
-        [
-          userId,
-
-          session.ticketId,
-
-          session.testId,
-
-          score,
-
-          total,
-
-          session.startedAt
-        ]
-      );
-
+      res.status(500).json({
+        success: false,
+        message: "Chiptani tekshirishda xatolik"
+      });
     }
-
-
-    // =========================
-    // NATIJA
-    // =========================
-
-    await ctx.reply(
-
-`🏁 TEST YAKUNLANDI!
-
-📝 Test:
-${session.testName}
-
-📊 Natija:
-
-✅ To'g'ri:
-${score}
-
-❌ Noto'g'ri:
-${total - score}
-
-📚 Jami:
-${total}
-
-📈 Foiz:
-${percentage}%
-
-🎉 Test topshirganingiz uchun rahmat!`
-
-    );
-
-
-    // Sessionni o'chirish
-
-    testSessions.delete(userId);
-
-  } catch (error) {
-
-    console.error(
-      "❌ TEST YAKUNLASH XATOSI:",
-      error.message
-    );
-
-    await ctx.reply(
-      "❌ Natijani saqlashda xatolik."
-    );
-
-    testSessions.delete(userId);
   }
+);
 
-}
+
+// ==========================================
+// BOTNI YARATISH
+// ==========================================
+
+createBot();
 
 
-// ===============================
-// 🛑 TESTNI BEKOR QILISH
-// ===============================
-
-bot.command("stoptest", async (ctx) => {
-
-  const userId =
-    ctx.from.id;
-
-  if (
-    testSessions.has(userId)
-  ) {
-
-    testSessions.delete(userId);
-
-    await ctx.reply(
-`🛑 TEST TO'XTATILDI.
-
-Test qayta boshlash uchun
-🎫 chipta raqamingizni yuboring.`
-    );
-
-  } else {
-
-    await ctx.reply(
-      "❌ Sizda faol test yo'q."
-    );
-
-  }
-
-});
-// ===============================
-// 🚀 BOT VA SERVERNI ISHGA TUSHIRISH
-// ===============================
+// ==========================================
+// SERVERNI ISHGA TUSHIRISH
+// ==========================================
 
 async function startServer() {
 
@@ -2066,28 +1706,100 @@ async function startServer() {
     // Database
     await initDatabase();
 
-    // Telegram bot
-    await bot.launch();
+    // Server
+    app.listen(
+      PORT,
+      "0.0.0.0",
+      async () => {
 
-    console.log("================================");
-    console.log("🤖 TELEGRAM BOT ISHLADI");
-    console.log("================================");
+        console.log(
+          "================================"
+        );
 
-    // Express server
-    app.listen(PORT, () => {
+        console.log(
+          `🚀 SERVER ${PORT} PORTDA ISHLAYAPTI`
+        );
 
-      console.log("================================");
-      console.log(`🌐 SERVER PORT: ${PORT}`);
-      console.log("✅ SERVER ISHLADI");
-      console.log("================================");
+        console.log(
+          `🌐 SITE: ${WEBHOOK_URL}`
+        );
 
-    });
+        console.log(
+          `📱 MINI APP: ${WEBHOOK_URL}`
+        );
+
+        console.log(
+          "================================"
+        );
+
+
+        // ==================================
+        // TELEGRAM WEBHOOK
+        // ==================================
+
+        try {
+
+          await bot.telegram.setWebhook(
+            `${WEBHOOK_URL}${WEBHOOK_PATH}`
+          );
+
+          console.log(
+            "✅ TELEGRAM WEBHOOK O'RNATILDI"
+          );
+
+          console.log(
+            `${WEBHOOK_URL}${WEBHOOK_PATH}`
+          );
+
+        } catch (error) {
+
+          console.error(
+            "❌ WEBHOOK XATOSI:",
+            error.message
+          );
+        }
+
+
+        // ==================================
+        // TELEGRAM MINI APP MENU BUTTON
+        // ==================================
+
+        try {
+
+          await bot.telegram.setChatMenuButton({
+            menu_button: {
+
+              type: "web_app",
+
+              text: "Mini App",
+
+              web_app: {
+                url: WEBHOOK_URL
+              }
+
+            }
+          });
+
+          console.log(
+            "✅ TELEGRAM MINI APP TUGMASI O'RNATILDI"
+          );
+
+        } catch (error) {
+
+          console.error(
+            "❌ MINI APP TUGMASI XATOSI:",
+            error.message
+          );
+        }
+
+      }
+    );
 
   } catch (error) {
 
     console.error(
-      "❌ APPLICATION START XATOSI:",
-      error
+      "❌ SERVER ISHGA TUSHISHIDA XATO:",
+      error.message
     );
 
     process.exit(1);
@@ -2095,23 +1807,8 @@ async function startServer() {
 }
 
 
-// ===============================
+// ==========================================
 // START
-// ===============================
+// ==========================================
 
 startServer();
-
-
-// ===============================
-// BOT TO'XTAGANDA
-// ===============================
-
-process.once(
-  "SIGINT",
-  () => bot.stop("SIGINT")
-);
-
-process.once(
-  "SIGTERM",
-  () => bot.stop("SIGTERM")
-);

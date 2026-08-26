@@ -1,12 +1,1694 @@
-<!doctype html>
-<html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Proxy Tests</title><link rel="stylesheet" href="style.css"></head>
-<body><main>
-<h1>Proxy Tests</h1>
-<div class="grid">
-<button onclick="show('news')">📰 Yangiliklar</button>
-<button onclick="show('tickets')">🎫 Chipta</button>
-<button onclick="show('tests')">📝 Testlar</button>
-</div>
-<section id="app"></section>
-</main><script src="app.js"></script></body></html>
+<!DOCTYPE html>
+<html lang="uz">
+
+<head>
+
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width,
+             initial-scale=1.0,
+             maximum-scale=1.0,
+             user-scalable=no"
+  >
+
+  <title>Proxy Tests</title>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <style>
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Arial,
+        sans-serif;
+
+      background:
+        var(--tg-theme-bg-color, #f2f2f2);
+
+      color:
+        var(--tg-theme-text-color, #222);
+
+      min-height: 100vh;
+    }
+
+    button {
+      font-family: inherit;
+    }
+
+    .header {
+      padding: 25px 20px 20px;
+
+      background:
+        var(
+          --tg-theme-secondary-bg-color,
+          #ffffff
+        );
+
+      border-bottom-left-radius: 25px;
+      border-bottom-right-radius: 25px;
+    }
+
+    .header-top {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .avatar {
+      width: 55px;
+      height: 55px;
+
+      border-radius: 50%;
+
+      display: flex;
+      align-items: center;
+      justify-content: center;
+
+      background: #2481cc;
+
+      color: white;
+
+      font-size: 23px;
+      font-weight: bold;
+    }
+
+    .welcome {
+      flex: 1;
+    }
+
+    .welcome small {
+      opacity: 0.65;
+      font-size: 13px;
+    }
+
+    .welcome h2 {
+      margin-top: 3px;
+      font-size: 20px;
+    }
+
+    .content {
+      padding: 18px;
+      padding-bottom: 100px;
+    }
+
+    .section-title {
+      font-size: 21px;
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    .cards {
+      display: grid;
+
+      grid-template-columns:
+        repeat(2, 1fr);
+
+      gap: 12px;
+
+      margin-bottom: 25px;
+    }
+
+    .card {
+      background:
+        var(
+          --tg-theme-secondary-bg-color,
+          #fff
+        );
+
+      border-radius: 18px;
+
+      padding: 18px 14px;
+
+      min-height: 125px;
+
+      box-shadow:
+        0 3px 12px
+        rgba(0,0,0,0.06);
+
+      cursor: pointer;
+
+      transition:
+        transform 0.15s;
+    }
+
+    .card:active {
+      transform: scale(0.96);
+    }
+
+    .card-icon {
+      font-size: 30px;
+      margin-bottom: 10px;
+    }
+
+    .card-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .card-text {
+      font-size: 12px;
+      opacity: 0.6;
+    }
+
+    .page {
+      display: none;
+    }
+
+    .page.active {
+      display: block;
+    }
+
+    .news-item {
+      background:
+        var(
+          --tg-theme-secondary-bg-color,
+          #fff
+        );
+
+      border-radius: 17px;
+
+      padding: 16px;
+
+      margin-bottom: 12px;
+
+      box-shadow:
+        0 3px 12px
+        rgba(0,0,0,0.05);
+    }
+
+    .news-title {
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .news-content {
+      font-size: 14px;
+      line-height: 1.5;
+      opacity: 0.8;
+    }
+
+    .news-date {
+      margin-top: 10px;
+      font-size: 12px;
+      opacity: 0.55;
+    }
+
+    .test-item {
+      background:
+        var(
+          --tg-theme-secondary-bg-color,
+          #fff
+        );
+
+      border-radius: 17px;
+
+      padding: 16px;
+
+      margin-bottom: 12px;
+
+      box-shadow:
+        0 3px 12px
+        rgba(0,0,0,0.05);
+    }
+
+    .test-name {
+      font-size: 17px;
+      font-weight: 700;
+    }
+
+    .test-time {
+      margin-top: 8px;
+      font-size: 13px;
+      opacity: 0.65;
+    }
+
+    .ticket-item {
+      background:
+        var(
+          --tg-theme-secondary-bg-color,
+          #fff
+        );
+
+      border-radius: 18px;
+
+      padding: 17px;
+
+      margin-bottom: 12px;
+
+      box-shadow:
+        0 3px 12px
+        rgba(0,0,0,0.05);
+    }
+
+    .ticket-number {
+      font-size: 27px;
+
+      font-weight: 800;
+
+      letter-spacing: 3px;
+
+      margin: 8px 0;
+    }
+
+    .status {
+      display: inline-block;
+
+      padding: 6px 10px;
+
+      border-radius: 10px;
+
+      font-size: 12px;
+
+      font-weight: 600;
+    }
+
+    .status-approved {
+      background: #d8f8df;
+      color: #168534;
+    }
+
+    .status-pending {
+      background: #fff0c7;
+      color: #a66b00;
+    }
+
+    .status-rejected {
+      background: #ffdcdc;
+      color: #c62828;
+    }
+
+    .profile {
+      background:
+        var(
+          --tg-theme-secondary-bg-color,
+          #fff
+        );
+
+      border-radius: 20px;
+
+      padding: 20px;
+
+      box-shadow:
+        0 3px 12px
+        rgba(0,0,0,0.05);
+    }
+
+    .profile-row {
+      display: flex;
+
+      justify-content: space-between;
+
+      gap: 10px;
+
+      padding: 13px 0;
+
+      border-bottom:
+        1px solid
+        rgba(128,128,128,0.15);
+    }
+
+    .profile-row:last-child {
+      border-bottom: none;
+    }
+
+    .profile-label {
+      opacity: 0.6;
+    }
+
+    .profile-value {
+      text-align: right;
+      font-weight: 600;
+    }
+
+    .main-button {
+      width: 100%;
+
+      border: none;
+
+      border-radius: 15px;
+
+      padding: 14px;
+
+      margin-top: 12px;
+
+      background: #2481cc;
+
+      color: white;
+
+      font-size: 15px;
+
+      font-weight: 700;
+
+      cursor: pointer;
+    }
+
+    .main-button:active {
+      transform: scale(0.98);
+    }
+
+    .loading {
+      text-align: center;
+      padding: 30px 10px;
+      opacity: 0.6;
+    }
+
+    .empty {
+      text-align: center;
+      padding: 35px 15px;
+      opacity: 0.6;
+    }
+
+    .bottom-nav {
+      position: fixed;
+
+      left: 0;
+      right: 0;
+      bottom: 0;
+
+      height: 72px;
+
+      background:
+        var(
+          --tg-theme-secondary-bg-color,
+          #fff
+        );
+
+      border-top:
+        1px solid
+        rgba(128,128,128,0.15);
+
+      display: flex;
+
+      justify-content:
+        space-around;
+
+      align-items: center;
+
+      z-index: 100;
+    }
+
+    .nav-button {
+      border: none;
+
+      background: transparent;
+
+      color:
+        var(
+          --tg-theme-hint-color,
+          #888
+        );
+
+      font-size: 11px;
+
+      display: flex;
+
+      flex-direction: column;
+
+      align-items: center;
+
+      gap: 4px;
+
+      cursor: pointer;
+    }
+
+    .nav-button span {
+      font-size: 22px;
+    }
+
+    .nav-button.active {
+      color: #2481cc;
+      font-weight: 700;
+    }
+
+  </style>
+
+</head>
+
+
+<body>
+
+
+<header class="header">
+
+  <div class="header-top">
+
+    <div
+      class="avatar"
+      id="avatar"
+    >
+      P
+    </div>
+
+    <div class="welcome">
+
+      <small>
+        Proxy Tests
+      </small>
+
+      <h2 id="userName">
+        Foydalanuvchi
+      </h2>
+
+    </div>
+
+  </div>
+
+</header>
+
+
+<main class="content">
+
+
+  <section
+    id="homePage"
+    class="page active"
+  >
+
+    <div class="section-title">
+      Bosh sahifa
+    </div>
+
+    <div class="cards">
+
+      <div
+        class="card"
+        onclick="showPage('newsPage')"
+      >
+
+        <div class="card-icon">
+          📰
+        </div>
+
+        <div class="card-title">
+          Yangiliklar
+        </div>
+
+        <div class="card-text">
+          So'nggi yangiliklar
+        </div>
+
+      </div>
+
+
+      <div
+        class="card"
+        onclick="showPage('testsPage')"
+      >
+
+        <div class="card-icon">
+          📝
+        </div>
+
+        <div class="card-title">
+          Testlar
+        </div>
+
+        <div class="card-text">
+          Testlarni ko'rish
+        </div>
+
+      </div>
+
+
+      <div
+        class="card"
+        onclick="showPage('ticketsPage')"
+      >
+
+        <div class="card-icon">
+          🎫
+        </div>
+
+        <div class="card-title">
+          Chiptalar
+        </div>
+
+        <div class="card-text">
+          Mening chiptalarim
+        </div>
+
+      </div>
+
+
+      <div
+        class="card"
+        onclick="showPage('profilePage')"
+      >
+
+        <div class="card-icon">
+          👤
+        </div>
+
+        <div class="card-title">
+          Profil
+        </div>
+
+        <div class="card-text">
+          Mening profilim
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <div class="section-title">
+      Xush kelibsiz! 👋
+    </div>
+
+
+    <div class="profile">
+
+      <p>
+        Proxy Tests platformasida
+        testlar, yangiliklar va
+        chiptalaringizni boshqarishingiz
+        mumkin.
+      </p>
+
+      <button
+        class="main-button"
+        onclick="showPage('testsPage')"
+      >
+        📝 Testlarni ko'rish
+      </button>
+
+    </div>
+
+  </section>
+
+
+  <section
+    id="newsPage"
+    class="page"
+  >
+
+    <div class="section-title">
+      📰 Yangiliklar
+    </div>
+
+    <div id="newsList">
+
+      <div class="loading">
+        Yuklanmoqda...
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <section
+    id="testsPage"
+    class="page"
+  >
+
+    <div class="section-title">
+      📝 Testlar
+    </div>
+
+    <div id="testsList">
+
+      <div class="loading">
+        Yuklanmoqda...
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <section
+    id="ticketsPage"
+    class="page"
+  >
+
+    <div class="section-title">
+      🎫 Chiptalarim
+    </div>
+
+    <div id="ticketsList">
+
+      <div class="loading">
+        Yuklanmoqda...
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <section
+    id="profilePage"
+    class="page"
+  >
+
+    <div class="section-title">
+      👤 Profil
+    </div>
+
+    <div id="profileBox">
+
+      <div class="loading">
+        Yuklanmoqda...
+      </div>
+
+    </div>
+
+  </section>
+
+
+</main>
+
+
+<nav class="bottom-nav">
+
+  <button
+    class="nav-button active"
+    onclick="showPage('homePage', this)"
+  >
+    <span>🏠</span>
+    Bosh sahifa
+  </button>
+
+  <button
+    class="nav-button"
+    onclick="showPage('newsPage', this)"
+  >
+    <span>📰</span>
+    Yangiliklar
+  </button>
+
+  <button
+    class="nav-button"
+    onclick="showPage('testsPage', this)"
+  >
+    <span>📝</span>
+    Testlar
+  </button>
+
+  <button
+    class="nav-button"
+    onclick="showPage('ticketsPage', this)"
+  >
+    <span>🎫</span>
+    Chipta
+  </button>
+
+  <button
+    class="nav-button"
+    onclick="showPage('profilePage', this)"
+  >
+    <span>👤</span>
+    Profil
+  </button>
+
+</nav>
+<script>
+
+// ========================================
+// TELEGRAM MINI APP
+// ========================================
+
+const tg =
+  window.Telegram &&
+  window.Telegram.WebApp
+    ? window.Telegram.WebApp
+    : null;
+
+
+if (tg) {
+
+  tg.ready();
+
+  tg.expand();
+
+}
+
+
+// ========================================
+// TELEGRAM USER
+// ========================================
+
+let telegramUser = null;
+
+
+if (
+  tg &&
+  tg.initDataUnsafe &&
+  tg.initDataUnsafe.user
+) {
+
+  telegramUser =
+    tg.initDataUnsafe.user;
+
+}
+
+
+// ========================================
+// USER ISMI
+// ========================================
+
+function getUserName() {
+
+  if (!telegramUser) {
+    return "Foydalanuvchi";
+  }
+
+  const first =
+    telegramUser.first_name || "";
+
+  const last =
+    telegramUser.last_name || "";
+
+  return (
+    `${first} ${last}`.trim() ||
+    "Foydalanuvchi"
+  );
+}
+
+
+document.getElementById(
+  "userName"
+).textContent =
+  getUserName();
+
+
+// ========================================
+// AVATAR
+// ========================================
+
+const name =
+  getUserName();
+
+document.getElementById(
+  "avatar"
+).textContent =
+  name.charAt(0).toUpperCase();
+
+
+// ========================================
+// SAHIFA O'ZGARTIRISH
+// ========================================
+
+function showPage(
+  pageId,
+  button = null
+) {
+
+  document
+    .querySelectorAll(".page")
+    .forEach(page => {
+
+      page.classList.remove(
+        "active"
+      );
+
+    });
+
+
+  const page =
+    document.getElementById(
+      pageId
+    );
+
+
+  if (page) {
+
+    page.classList.add(
+      "active"
+    );
+
+  }
+
+
+  // NAVIGATION
+
+  document
+    .querySelectorAll(".nav-button")
+    .forEach(btn => {
+
+      btn.classList.remove(
+        "active"
+      );
+
+    });
+
+
+  if (button) {
+
+    button.classList.add(
+      "active"
+    );
+
+  }
+
+
+  // MA'LUMOTLARNI YUKLASH
+
+  if (
+    pageId === "newsPage"
+  ) {
+
+    loadNews();
+
+  }
+
+
+  if (
+    pageId === "testsPage"
+  ) {
+
+    loadTests();
+
+  }
+
+
+  if (
+    pageId === "ticketsPage"
+  ) {
+
+    loadTickets();
+
+  }
+
+
+  if (
+    pageId === "profilePage"
+  ) {
+
+    loadProfile();
+
+  }
+
+}
+
+
+// ========================================
+// YANGILIKLARNI OLISH
+// ========================================
+
+async function loadNews() {
+
+  const container =
+    document.getElementById(
+      "newsList"
+    );
+
+
+  container.innerHTML = `
+    <div class="loading">
+      Yuklanmoqda...
+    </div>
+  `;
+
+
+  try {
+
+    const response =
+      await fetch(
+        "/api/news"
+      );
+
+
+    const data =
+      await response.json();
+
+
+    if (
+      !data.success ||
+      !data.news ||
+      data.news.length === 0
+    ) {
+
+      container.innerHTML = `
+        <div class="empty">
+          📰 Hozircha yangiliklar yo'q.
+        </div>
+      `;
+
+      return;
+    }
+
+
+    container.innerHTML = "";
+
+
+    data.news.forEach(
+      news => {
+
+        const item =
+          document.createElement(
+            "div"
+          );
+
+
+        item.className =
+          "news-item";
+
+
+        item.innerHTML = `
+
+          <div class="news-title">
+
+            📌 ${
+              escapeHtml(
+                news.title ||
+                "Yangilik"
+              )
+            }
+
+          </div>
+
+
+          <div class="news-content">
+
+            ${
+              escapeHtml(
+                news.content ||
+                ""
+              )
+            }
+
+          </div>
+
+
+          ${
+            news.test_date
+              ? `
+                <div class="news-date">
+                  📅 ${
+                    escapeHtml(
+                      news.test_date
+                    )
+                  }
+                </div>
+              `
+              : ""
+          }
+
+        `;
+
+
+        container.appendChild(
+          item
+        );
+
+      }
+    );
+
+
+  } catch (error) {
+
+    console.error(
+      "NEWS ERROR:",
+      error
+    );
+
+
+    container.innerHTML = `
+      <div class="empty">
+        ❌ Yangiliklarni yuklab bo'lmadi.
+      </div>
+    `;
+
+  }
+
+}
+
+
+// ========================================
+// TESTLARNI OLISH
+// ========================================
+
+async function loadTests() {
+
+  const container =
+    document.getElementById(
+      "testsList"
+    );
+
+
+  container.innerHTML = `
+    <div class="loading">
+      Yuklanmoqda...
+    </div>
+  `;
+
+
+  try {
+
+    const response =
+      await fetch(
+        "/api/tests"
+      );
+
+
+    const data =
+      await response.json();
+
+
+    if (
+      !data.success ||
+      !data.tests ||
+      data.tests.length === 0
+    ) {
+
+      container.innerHTML = `
+        <div class="empty">
+          📝 Hozircha testlar yo'q.
+        </div>
+      `;
+
+      return;
+    }
+
+
+    container.innerHTML = "";
+
+
+    data.tests.forEach(
+      test => {
+
+        const item =
+          document.createElement(
+            "div"
+          );
+
+
+        item.className =
+          "test-item";
+
+
+        let time = "";
+
+
+        if (
+          test.start_time
+        ) {
+
+          time =
+            new Date(
+              test.start_time
+            ).toLocaleString(
+              "uz-UZ"
+            );
+
+        }
+
+
+        item.innerHTML = `
+
+          <div class="test-name">
+
+            📝 ${
+              escapeHtml(
+                test.name ||
+                "Test"
+              )
+            }
+
+          </div>
+
+
+          ${
+            time
+              ? `
+                <div class="test-time">
+
+                  ⏰ Boshlanish:
+
+                  ${escapeHtml(
+                    time
+                  )}
+
+                </div>
+              `
+              : `
+                <div class="test-time">
+
+                  ⏰ Vaqt hali belgilanmagan
+
+                </div>
+              `
+          }
+
+
+          <button
+            class="main-button"
+            onclick="openBotTicket()"
+          >
+
+            🎫 Chipta olish
+
+          </button>
+
+        `;
+
+
+        container.appendChild(
+          item
+        );
+
+      }
+    );
+
+
+  } catch (error) {
+
+    console.error(
+      "TEST ERROR:",
+      error
+    );
+
+
+    container.innerHTML = `
+      <div class="empty">
+        ❌ Testlarni yuklab bo'lmadi.
+      </div>
+    `;
+
+  }
+
+}
+
+
+// ========================================
+// CHITTA'LARNI OLISH
+// ========================================
+
+async function loadTickets() {
+
+  const container =
+    document.getElementById(
+      "ticketsList"
+    );
+
+
+  if (!telegramUser) {
+
+    container.innerHTML = `
+      <div class="empty">
+
+        📱 Mini App'ni
+        Telegram ichidan oching.
+
+      </div>
+    `;
+
+    return;
+  }
+
+
+  container.innerHTML = `
+    <div class="loading">
+      Yuklanmoqda...
+    </div>
+  `;
+
+
+  try {
+
+    const response =
+      await fetch(
+        `/api/tickets/${telegramUser.id}`
+      );
+
+
+    const data =
+      await response.json();
+
+
+    if (
+      !data.success ||
+      !data.tickets ||
+      data.tickets.length === 0
+    ) {
+
+      container.innerHTML = `
+        <div class="empty">
+
+          🎫 Sizda hali chipta yo'q.
+
+        </div>
+      `;
+
+      return;
+    }
+
+
+    container.innerHTML = "";
+
+
+    data.tickets.forEach(
+      ticket => {
+
+        const item =
+          document.createElement(
+            "div"
+          );
+
+
+        item.className =
+          "ticket-item";
+
+
+        let statusText =
+          "Kutilmoqda";
+
+
+        let statusClass =
+          "status-pending";
+
+
+        if (
+          ticket.payment_status ===
+          "approved"
+        ) {
+
+          statusText =
+            "Tasdiqlangan";
+
+          statusClass =
+            "status-approved";
+
+        }
+
+
+        if (
+          ticket.payment_status ===
+          "rejected"
+        ) {
+
+          statusText =
+            "Rad etilgan";
+
+          statusClass =
+            "status-rejected";
+
+        }
+
+
+        item.innerHTML = `
+
+          <div>
+
+            📝 ${
+              escapeHtml(
+                ticket.test_name ||
+                "Test"
+              )
+            }
+
+          </div>
+
+
+          ${
+            ticket.ticket_number
+              ? `
+                <div class="ticket-number">
+
+                  ${escapeHtml(
+                    ticket.ticket_number
+                  )}
+
+                </div>
+              `
+              : `
+                <div
+                  style="
+                    margin-top:10px;
+                    opacity:.6;
+                  "
+                >
+
+                  Chipta raqami
+                  hali berilmagan
+
+                </div>
+              `
+          }
+
+
+          <div style="margin-top:10px">
+
+            <span
+              class="status ${statusClass}"
+            >
+
+              ${statusText}
+
+            </span>
+
+          </div>
+
+
+          ${
+            ticket.expires_at
+              ? `
+                <div class="news-date">
+
+                  ⏰ Amal qilish:
+
+                  ${
+                    new Date(
+                      ticket.expires_at
+                    ).toLocaleString(
+                      "uz-UZ"
+                    )
+                  }
+
+                </div>
+              `
+              : ""
+          }
+
+        `;
+
+
+        container.appendChild(
+          item
+        );
+
+      }
+    );
+
+
+  } catch (error) {
+
+    console.error(
+      "TICKET ERROR:",
+      error
+    );
+
+
+    container.innerHTML = `
+      <div class="empty">
+
+        ❌ Chiptalarni yuklab bo'lmadi.
+
+      </div>
+    `;
+
+  }
+
+}
+
+
+// ========================================
+// PROFILNI OLISH
+// ========================================
+
+async function loadProfile() {
+
+  const container =
+    document.getElementById(
+      "profileBox"
+    );
+
+
+  if (!telegramUser) {
+
+    container.innerHTML = `
+      <div class="empty">
+
+        📱 Profilni ko'rish uchun
+        Mini App'ni Telegram ichidan oching.
+
+      </div>
+    `;
+
+    return;
+  }
+
+
+  container.innerHTML = `
+    <div class="loading">
+      Yuklanmoqda...
+    </div>
+  `;
+
+
+  try {
+
+    const response =
+      await fetch(
+        `/api/user/${telegramUser.id}`
+      );
+
+
+    const data =
+      await response.json();
+
+
+    if (!data.success) {
+
+      container.innerHTML = `
+        <div class="empty">
+
+          ❌ Profil topilmadi.
+
+        </div>
+      `;
+
+      return;
+    }
+
+
+    const user =
+      data.user;
+
+
+    container.innerHTML = `
+
+      <div class="profile">
+
+
+        <div class="profile-row">
+
+          <span class="profile-label">
+            👤 F.I.SH
+          </span>
+
+          <span class="profile-value">
+
+            ${
+              escapeHtml(
+                user.full_name ||
+                "—"
+              )
+            }
+
+          </span>
+
+        </div>
+
+
+        <div class="profile-row">
+
+          <span class="profile-label">
+            🆔 Telegram ID
+          </span>
+
+          <span class="profile-value">
+
+            ${
+              escapeHtml(
+                String(
+                  user.telegram_id
+                )
+              )
+            }
+
+          </span>
+
+        </div>
+
+
+        <div class="profile-row">
+
+          <span class="profile-label">
+            🔹 Username
+          </span>
+
+          <span class="profile-value">
+
+            ${
+              user.username
+                ? "@" +
+                  escapeHtml(
+                    user.username
+                  )
+                : "—"
+            }
+
+          </span>
+
+        </div>
+
+
+        <div class="profile-row">
+
+          <span class="profile-label">
+            📅 Ro'yxatdan o'tgan
+          </span>
+
+          <span class="profile-value">
+
+            ${
+              user.created_at
+                ? new Date(
+                    user.created_at
+                  ).toLocaleDateString(
+                    "uz-UZ"
+                  )
+                : "—"
+            }
+
+          </span>
+
+        </div>
+
+
+      </div>
+
+    `;
+
+
+  } catch (error) {
+
+    console.error(
+      "PROFILE ERROR:",
+      error
+    );
+
+
+    container.innerHTML = `
+      <div class="empty">
+
+        ❌ Profilni yuklab bo'lmadi.
+
+      </div>
+    `;
+
+  }
+
+}
+
+
+// ========================================
+// CHITTA OLISH
+// ========================================
+
+function openBotTicket() {
+
+  if (tg) {
+
+    tg.showPopup({
+
+      title:
+        "🎫 Chipta olish",
+
+      message:
+        "Chipta olish uchun Telegram botdagi 🎫 Chipta bo'limidan foydalaning.",
+
+      buttons: [
+        {
+          type: "ok"
+        }
+      ]
+
+    });
+
+  } else {
+
+    alert(
+      "Telegram botdagi 🎫 Chipta bo'limidan foydalaning."
+    );
+
+  }
+
+}
+
+
+// ========================================
+// XAVFSIZ HTML
+// ========================================
+
+function escapeHtml(text) {
+
+  const div =
+    document.createElement(
+      "div"
+    );
+
+
+  div.textContent =
+    text ?? "";
+
+
+  return div.innerHTML;
+
+}
+
+
+// ========================================
+// BOSHLANG'ICH YUKLASH
+// ========================================
+
+loadNews();
+
+
+// ========================================
+// TELEGRAM MAIN BUTTON
+// ========================================
+
+if (tg) {
+
+  tg.MainButton.setText(
+    "🏠 Bosh sahifa"
+  );
+
+
+  tg.MainButton.onClick(
+    () => {
+
+      showPage(
+        "homePage"
+      );
+
+      tg.MainButton.hide();
+
+    }
+  );
+
+}
+
+
+// ========================================
+// TAYYOR
+// ========================================
+
+console.log(
+  "✅ Proxy Tests Mini App ishga tushdi"
+);
+
+</script>
+
+
+</body>
+
+</html>
