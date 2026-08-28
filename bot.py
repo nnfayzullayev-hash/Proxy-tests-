@@ -1,127 +1,38 @@
 import asyncio
-import os
+import logging
 
-from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
-from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
+import config
+from database import db
+from handlers import start, news, tickets, tests, admin
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN topilmadi!")
-
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-
-# =========================
-# ASOSIY MENYU
-# =========================
-
-def main_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="📰 Yangiliklar")
-            ],
-            [
-                KeyboardButton(text="🎫 Chipta"),
-                KeyboardButton(text="📝 Testlar")
-            ],
-            [
-                KeyboardButton(text="ℹ️ Ma'lumot")
-            ]
-        ],
-        resize_keyboard=True
-    )
-
-
-# =========================
-# /start
-# =========================
-
-@dp.message(CommandStart())
-async def start_handler(message: Message):
-
-    name = message.from_user.first_name
-
-    await message.answer(
-        f"👋 Salom, {name}!\n\n"
-        "🤖 Botimizga xush kelibsiz!\n\n"
-        "Kerakli bo‘limni tanlang:",
-        reply_markup=main_menu()
-    )
-
-
-# =========================
-# YANGILIKLAR
-# =========================
-
-@dp.message(lambda message: message.text == "📰 Yangiliklar")
-async def news_handler(message: Message):
-
-    await message.answer(
-        "📰 YANGILIKLAR\n\n"
-        "Hozircha yangiliklar mavjud emas."
-    )
-
-
-# =========================
-# CHIPTA
-# =========================
-
-@dp.message(lambda message: message.text == "🎫 Chipta")
-async def ticket_handler(message: Message):
-
-    await message.answer(
-        "🎫 CHIPTA BO‘LIMI\n\n"
-        "Bu yerda test uchun chipta olish mumkin."
-    )
-
-
-# =========================
-# TESTLAR
-# =========================
-
-@dp.message(lambda message: message.text == "📝 Testlar")
-async def test_handler(message: Message):
-
-    await message.answer(
-        "📝 TESTLAR BO‘LIMI\n\n"
-        "Testni boshlash uchun chipta kerak."
-    )
-
-
-# =========================
-# MA'LUMOT
-# =========================
-
-@dp.message(lambda message: message.text == "ℹ️ Ma'lumot")
-async def info_handler(message: Message):
-
-    await message.answer(
-        "ℹ️ BOT HAQIDA\n\n"
-        "📰 Yangiliklar\n"
-        "🎫 Chipta olish\n"
-        "📝 Test ishlash\n"
-        "📄 Natijalarni olish"
-    )
-
-
-# =========================
-# BOTNI ISHGA TUSHIRISH
-# =========================
 
 async def main():
+    logging.basicConfig(level=logging.INFO)
 
-    print("🤖 Bot ishga tushmoqda...")
+    await db.connect()
 
-    await dp.start_polling(bot)
+    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=MemoryStorage())
+
+    # Admin routerini birinchi qo'shamiz, chunki uning matn tugmalari
+    # foydalanuvchi menyusidan farqli va tekshirilishi kerak.
+    dp.include_router(admin.router)
+    dp.include_router(tickets.router)
+    dp.include_router(tests.router)
+    dp.include_router(news.router)
+    dp.include_router(start.router)
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    try:
+        logging.info("Bot ishga tushdi...")
+        await dp.start_polling(bot)
+    finally:
+        await db.close()
 
 
 if __name__ == "__main__":
